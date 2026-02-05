@@ -1,0 +1,122 @@
+================================================================
+SUPPLEMENTARY INFORMATION CONTEXT
+Project: AFN-DeSeg
+Source: PhotoniX Submission_TPF Joint Denoising and Segmentation_SI.docx
+================================================================
+
+[Note S1: Sample Collection and Preparation]
+- Samples: Human ovarian tumor tissues (resected).
+- Ethics: Approved by Shanghai First Maternity and Infant Hospital (No. KS22335).
+- Processing:
+  1. Rinsed with PBS.
+  2. Fixed in 4% formaldehyde (24h at 4°C).
+  3. Dehydrated (ethanol series), cleared (xylene), infiltrated (paraffin).
+  4. Sectioned at 5 µm thickness.
+
+[Note S2: Imaging System]
+- Microscope: Olympus FVMPE-RS.
+- Objective: XLUMPLFLN20XW (20x, NA 1.0, Water).
+- Laser: Ti:Sapphire femtosecond laser (Chameleon Ultra II).
+- Excitation Wavelength: 860 nm (Simultaneous excitation of NADH and FAD).
+- Detectors (PMTs):
+  - NADH Channel: Bandpass filter BA495-540.
+  - FAD Channel: Bandpass filter BA575-645.
+- Acquisition Parameters:
+  - Resolution: 1024x1024 pixels.
+  - FOV Size: 636.396 x 636.396 µm (0.621 µm/pixel).
+  - Dwell time: 2.0 µs.
+
+[Note S3: Denoising Dataset Generation (The Physics-Informed Noise Model)]
+**Crucial Section for Code Implementation**
+
+1. Strategy:
+   We use clean images (I_clean) from public datasets and synthetically add noise to create I_noisy.
+   The noise model is derived from real TPAF frame-averaging experiments (comparing 1-frame vs 16-frame averages).
+
+2. Reference Datasets (Source of I_clean):
+   - BBBC007 (Drosophila actin)
+   - BBBC008 (Colon Cancer cytoplasm)
+   - BBBC020 (Murine Macrophages)
+   - Cellpose dataset
+   - MP6843 (Neuroblastoma)
+   - NeurIPS 2022 Cell Segmentation Challenge
+
+3. Mathematical Noise Model (Mixed Poisson-Gaussian):
+   The relation between the noisy image (I_fn) and the clean ground truth (I_16) is modeled as:
+
+   Equation (S1):
+   I_{fn} = (1/g) * Poisson(g * I_{16}) + N(0, \sigma_{read}^2)
+
+   Variables:
+   - I_{fn}: Image averaged over 'n' frames (n=1, 4, 8).
+   - g: Detector gain factor (converts photons to digital units).
+   - Poisson(.): Poisson distribution reflecting photon shot noise.
+   - N(0, \sigma_{read}^2): Additive Gaussian noise reflecting electronic readout noise.
+   - \sigma_{read}: Standard deviation of readout noise.
+
+4. Parameter Estimation (How to find g and sigma):
+   To estimate parameters for a specific noise level:
+   a. Compute pixel-wise difference: D = I_{fn} - I_{16}
+   b. Calculate mean (\mu) of I_{16} and variance (v) of D for local patches.
+   c. Perform linear regression based on the property:
+      v = (1/g) * \mu + \sigma_{read}^2
+      (Slope = 1/g, Intercept = \sigma_{read}^2)
+
+5. Synthesis Pipeline (Code Logic):
+   To generate a training pair:
+   I_synthetic = (1/g_n) * Poisson(g_n * I_clean) + Gaussian_Noise(0, \sigma_{read,n})
+   Where 'n' is randomly chosen from empirical noise levels (Level 1, 2, 3).
+
+[Note S4: H&E Pathology Analysis Models]
+1. CLAM (for Key Diagnostic Area / Subtyping):
+   - Input: Patches extracted from WSI (256x256 at 20x).
+   - Backbone: UNI foundation model (1024-dim features).
+   - Training Data: UBC-OCEAN dataset (500+ slides).
+   - Output: Attention Heatmaps used as GT for "Key Diagnostic Areas".
+
+2. HoVer-Net (for Nuclei Segmentation GT):
+   - Weights: Pre-trained on PanNuke dataset.
+   - Output: Instance segmentation masks for H&E images.
+
+[Note S5: Benchmark Methods Configuration]
+1. BM3D: Standard PSD-based noise estimation.
+2. CARE: Standard U-Net (depth 4), trained supervised (Noisy -> Clean), L1 Loss.
+3. Noise2Fast: Self-supervised, blind-spot masking, trained only on Noisy images.
+4. DenoiSeg:
+   - Architecture: Shared Encoder -> Two Decoders (Denoise + Segment).
+   - Loss Weights: \lambda_{rec} = 1.0, \lambda_{seg} = 2.0.
+5. Cellpose 3:
+   - Nuclei-style backbone.
+   - Resized so avg diameter = 30 pixels.
+   - Trained from scratch on Noisy TPAF data.
+
+[Note S6: Evaluation Metrics Definitions]
+
+A. Image Restoration
+   1. PSNR (Peak Signal-to-Noise Ratio):
+      PSNR = 10 * log10( MAX_I^2 / MSE )
+   2. SSIM (Structural Similarity):
+      Standard implementation using local means, variances, and covariances.
+
+B. Segmentation
+   1. Dice Coefficient (DC):
+      DC = (2 * TP) / (2 * TP + FP + FN)
+   2. mAP @ IoU 0.5:
+      Instance-level precision. A detection is TP if IoU > 0.5.
+
+C. Nuclei Morphology (Quantitative Pathology)
+   1. Nuclear Area (A_nuc): Pixel count per instance.
+   2. Nuclear Circularity (C_nuc):
+      C_nuc = (4 * \pi * A_nuc) / (P_nuc^2)
+      (where P_nuc is perimeter. 1.0 = perfect circle).
+   3. Nuclear Density (D_FOV):
+      Count of nuclei per FOV area.
+
+D. Clinical Validation
+   1. Key Area Fraction (KAF):
+      KAF = (Area of Key Diagnostic Region) / (Total Tissue Area)
+   2. Bland-Altman Analysis:
+      Bias = Mean(TPAF_pred - HE_GT)
+      LoA = Bias +/- 1.96 * SD_diff
+   3. HD95 (Boundary Precision):
+      95th percentile of Hausdorff Distance between predicted and GT tumor boundaries.
