@@ -1,0 +1,139 @@
+# AFN-DeSeg Default Configuration
+# Based on paper sections 4.2.1-4.2.3
+
+# =============================================================================
+# Model Configuration
+# =============================================================================
+model:
+  img_size: 512
+  in_channels: 3  # Pseudo-RGB for DINOv3
+
+  # U-Net Encoder
+  unet:
+    base_channels: 64
+    # Channel progression: 64 -> 128 -> 256 -> 512
+
+  # DINOv3 ViT Encoder
+  vit:
+    embed_dim: 768
+    depth: 12
+    num_heads: 12
+    patch_size: 16
+    # LoRA configuration
+    lora_r: 16
+    lora_alpha: 16
+
+# =============================================================================
+# Data Configuration
+# =============================================================================
+data:
+  img_size: 512
+  normalize: "minmax"  # Options: minmax, percentile, fixed
+
+  # Data augmentation
+  augmentation:
+    horizontal_flip: true
+    vertical_flip: true
+    random_rotate90: true
+    elastic_transform: false
+
+  # ImageNet normalization for DINOv3
+  imagenet_mean: [0.485, 0.456, 0.406]
+  imagenet_std: [0.229, 0.224, 0.225]
+
+# =============================================================================
+# Loss Configuration (Section 4.2.2)
+# =============================================================================
+loss:
+  # Loss weights
+  lambda_rec: 1.0      # Reconstruction loss (L1)
+  lambda_seg: 10.0     # Segmentation loss (Dice + BCE)
+  lambda_percep: 0.1   # Perceptual loss (Cellpose features)
+
+  # Perceptual loss
+  perceptual:
+    use_cellpose: true
+    model_type: "cyto2"
+    feature_layers:
+      - "bottleneck"
+      - "upsample1"
+
+# =============================================================================
+# Stage 1: DINO Domain Adaptation (Section 4.2.3)
+# =============================================================================
+stage1:
+  epochs: 50
+  batch_size: 16
+
+  # Optimizer
+  optimizer:
+    type: "AdamW"
+    lr: 1.0e-4
+    weight_decay: 0.05
+
+  # Scheduler
+  scheduler:
+    type: "CosineAnnealingLR"
+    min_lr: 1.0e-6
+
+  # DINO settings
+  dino:
+    teacher_temp: 0.04
+    student_temp: 0.1
+    center_momentum: 0.9
+    ema_decay: 0.996  # Teacher EMA update
+
+# =============================================================================
+# Stage 2: Joint Training (Section 4.2.3)
+# =============================================================================
+stage2:
+  epochs: 150
+  batch_size: 4
+
+  # Optimizer
+  optimizer:
+    type: "AdamW"
+    lr: 1.0e-4
+    weight_decay: 0.05
+
+  # Scheduler
+  scheduler:
+    type: "CosineAnnealingLR"
+    min_lr: 1.0e-6
+
+  # Gradient clipping
+  gradient_clip:
+    max_norm: 1.0
+
+  # Early stopping
+  early_stopping:
+    patience: 20
+    monitor: "val_dice"
+    mode: "max"
+
+# =============================================================================
+# Inference Configuration
+# =============================================================================
+inference:
+  batch_size: 1
+  threshold: 0.5  # Segmentation threshold
+  save_format: "tif"
+
+# =============================================================================
+# Hardware Configuration
+# =============================================================================
+hardware:
+  device: "cuda"  # cuda or cpu
+  num_workers: 4
+  pin_memory: true
+  seed: 42
+
+# =============================================================================
+# Logging Configuration
+# =============================================================================
+logging:
+  save_frequency: 1  # Save checkpoint every N epochs
+  log_frequency: 10  # Log metrics every N batches
+  visualization:
+    enabled: true
+    num_samples: 5
