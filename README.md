@@ -210,19 +210,6 @@ The evaluation script computes:
 - **Nuclei Morphology**: Nuclear Area, Circularity, Density
 - **Clinical Validation**: HD95 (boundary precision), Bland-Altman analysis
 
-## Citation
-
-If you use this code, please cite:
-
-```bibtex
-@article{pan2024afndeseg,
-  title={A Joint Denoising and Segmentation Framework for Ovarian Cancer Diagnosis based on Two-Photon Autofluorescence Microscopy},
-  author={Pan, Zhengyuan and Song, Naikun and Cheng, Shanshan and Pang, Wen and Liao, Hongen and Wang, Yu and Gu, Bobo},
-  journal={Nature Communications},
-  year={2024}
-}
-```
-
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
