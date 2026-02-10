@@ -874,9 +874,234 @@ class AFNDeSeg(nn.Module):
         return image
 
 
+def load_dinov3_weights(
+    encoder: DINOv3Encoder,
+    model_name: str = "facebook/dinov3-vitb16-pretrain-lvd1689m",
+    device: str = "cpu"
+) -> DINOv3Encoder:
+    """
+    Load pretrained DINOv3 weights from HuggingFace.
+
+    Args:
+        encoder: DINOv3Encoder instance to load weights into.
+        model_name: HuggingFace model identifier.
+                   Default: "facebook/dinov3-vitb16-pretrain-lvd1689m"
+        device: Device to load weights on.
+
+    Returns:
+        Encoder with pretrained weights loaded.
+
+    Note:
+        This function maps DINOv3 weights to our custom encoder architecture.
+        LoRA parameters are initialized fresh (not from pretrained).
+    """
+    try:
+        from transformers import AutoModel
+    except ImportError:
+        raise ImportError(
+            "transformers library required for loading HuggingFace weights. "
+            "Install with: pip install transformers"
+        )
+
+    print(f"Loading pretrained weights from {model_name}...")
+
+    # Load pretrained model from HuggingFace
+    pretrained = AutoModel.from_pretrained(model_name)
+    pretrained_state = pretrained.state_dict()
+
+    # Create mapping from HuggingFace keys to our encoder keys
+    encoder_state = encoder.state_dict()
+    new_state = {}
+
+    for key in encoder_state.keys():
+        # Skip LoRA parameters (these should be trained fresh)
+        if 'lora_A' in key or 'lora_B' in key:
+            new_state[key] = encoder_state[key]
+            continue
+
+        # Map patch embedding
+        if 'patch_embed.proj' in key:
+            hf_key = key.replace('patch_embed.proj', 'embeddings.patch_embeddings.projection')
+            if hf_key in pretrained_state:
+                new_state[key] = pretrained_state[hf_key]
+            else:
+                new_state[key] = encoder_state[key]
+
+        # Map positional embeddings
+        elif 'pos_embed' in key:
+            if 'embeddings.position_embeddings' in pretrained_state:
+                # May need interpolation if sizes differ
+                pretrained_pos = pretrained_state['embeddings.position_embeddings']
+                if pretrained_pos.shape == encoder_state[key].shape:
+                    new_state[key] = pretrained_pos
+                else:
+                    # Interpolate positional embeddings
+                    new_state[key] = _interpolate_pos_embed(
+                        pretrained_pos, encoder_state[key].shape
+                    )
+            else:
+                new_state[key] = encoder_state[key]
+
+        # Map transformer blocks
+        elif 'blocks.' in key:
+            block_idx = int(key.split('.')[1])
+            hf_prefix = f'encoder.layer.{block_idx}'
+
+            # Map attention layers
+            if '.attn.q_proj.linear' in key:
+                hf_key = f'{hf_prefix}.attention.attention.query'
+                if hf_key + '.weight' in pretrained_state:
+                    if 'weight' in key:
+                        new_state[key] = pretrained_state[hf_key + '.weight']
+                    elif 'bias' in key:
+                        new_state[key] = pretrained_state[hf_key + '.bias']
+                else:
+                    new_state[key] = encoder_state[key]
+
+            elif '.attn.k_proj' in key:
+                hf_key = f'{hf_prefix}.attention.attention.key'
+                if hf_key + '.weight' in pretrained_state:
+                    if 'weight' in key:
+                        new_state[key] = pretrained_state[hf_key + '.weight']
+                    elif 'bias' in key:
+                        new_state[key] = pretrained_state[hf_key + '.bias']
+                else:
+                    new_state[key] = encoder_state[key]
+
+            elif '.attn.v_proj.linear' in key:
+                hf_key = f'{hf_prefix}.attention.attention.value'
+                if hf_key + '.weight' in pretrained_state:
+                    if 'weight' in key:
+                        new_state[key] = pretrained_state[hf_key + '.weight']
+                    elif 'bias' in key:
+                        new_state[key] = pretrained_state[hf_key + '.bias']
+                else:
+                    new_state[key] = encoder_state[key]
+
+            elif '.attn.out_proj' in key:
+                hf_key = f'{hf_prefix}.attention.output.dense'
+                if hf_key + '.weight' in pretrained_state:
+                    if 'weight' in key:
+                        new_state[key] = pretrained_state[hf_key + '.weight']
+                    elif 'bias' in key:
+                        new_state[key] = pretrained_state[hf_key + '.bias']
+                else:
+                    new_state[key] = encoder_state[key]
+
+            # Map layer norms
+            elif '.norm1' in key:
+                hf_key = f'{hf_prefix}.layernorm_before'
+                if hf_key + '.weight' in pretrained_state:
+                    if 'weight' in key:
+                        new_state[key] = pretrained_state[hf_key + '.weight']
+                    elif 'bias' in key:
+                        new_state[key] = pretrained_state[hf_key + '.bias']
+                else:
+                    new_state[key] = encoder_state[key]
+
+            elif '.norm2' in key:
+                hf_key = f'{hf_prefix}.layernorm_after'
+                if hf_key + '.weight' in pretrained_state:
+                    if 'weight' in key:
+                        new_state[key] = pretrained_state[hf_key + '.weight']
+                    elif 'bias' in key:
+                        new_state[key] = pretrained_state[hf_key + '.bias']
+                else:
+                    new_state[key] = encoder_state[key]
+
+            # Map MLP
+            elif '.mlp.0' in key:  # First linear
+                hf_key = f'{hf_prefix}.intermediate.dense'
+                if hf_key + '.weight' in pretrained_state:
+                    if 'weight' in key:
+                        new_state[key] = pretrained_state[hf_key + '.weight']
+                    elif 'bias' in key:
+                        new_state[key] = pretrained_state[hf_key + '.bias']
+                else:
+                    new_state[key] = encoder_state[key]
+
+            elif '.mlp.2' in key:  # Second linear
+                hf_key = f'{hf_prefix}.output.dense'
+                if hf_key + '.weight' in pretrained_state:
+                    if 'weight' in key:
+                        new_state[key] = pretrained_state[hf_key + '.weight']
+                    elif 'bias' in key:
+                        new_state[key] = pretrained_state[hf_key + '.bias']
+                else:
+                    new_state[key] = encoder_state[key]
+
+            else:
+                new_state[key] = encoder_state[key]
+
+        # Map final layer norm
+        elif 'norm.weight' in key or 'norm.bias' in key:
+            hf_key = 'layernorm'
+            if hf_key + '.weight' in pretrained_state:
+                if 'weight' in key:
+                    new_state[key] = pretrained_state[hf_key + '.weight']
+                elif 'bias' in key:
+                    new_state[key] = pretrained_state[hf_key + '.bias']
+            else:
+                new_state[key] = encoder_state[key]
+
+        else:
+            # Keep original for unmapped keys
+            new_state[key] = encoder_state[key]
+
+    # Load the mapped state dict
+    encoder.load_state_dict(new_state, strict=False)
+    print(f"Successfully loaded pretrained weights (LoRA parameters initialized fresh)")
+
+    return encoder
+
+
+def _interpolate_pos_embed(
+    pos_embed: torch.Tensor,
+    target_shape: Tuple[int, ...]
+) -> torch.Tensor:
+    """
+    Interpolate positional embeddings to target shape.
+
+    Args:
+        pos_embed: Original positional embeddings.
+        target_shape: Target shape.
+
+    Returns:
+        Interpolated positional embeddings.
+    """
+    if pos_embed.shape == target_shape:
+        return pos_embed
+
+    # Assume shape is (1, N, D) where N = H*W
+    _, N, D = pos_embed.shape
+    _, target_N, _ = target_shape
+
+    # Compute grid sizes
+    src_size = int(N ** 0.5)
+    tgt_size = int(target_N ** 0.5)
+
+    # Reshape to (1, D, H, W)
+    pos_embed = pos_embed.transpose(1, 2).reshape(1, D, src_size, src_size)
+
+    # Interpolate
+    pos_embed = F.interpolate(
+        pos_embed,
+        size=(tgt_size, tgt_size),
+        mode='bicubic',
+        align_corners=False
+    )
+
+    # Reshape back to (1, N, D)
+    pos_embed = pos_embed.reshape(1, D, -1).transpose(1, 2)
+
+    return pos_embed
+
+
 def create_afn_deseg(
     img_size: int = 512,
     pretrained_vit: Optional[str] = None,
+    pretrained_dinov3: bool = False,
+    dinov3_model_name: str = "facebook/dinov3-vitb16-pretrain-lvd1689m",
     **kwargs
 ) -> AFNDeSeg:
     """
@@ -884,16 +1109,39 @@ def create_afn_deseg(
 
     Args:
         img_size: Input image size.
-        pretrained_vit: Path to pretrained ViT weights (optional).
+        pretrained_vit: Path to local pretrained ViT weights (optional).
+        pretrained_dinov3: Whether to load DINOv3 weights from HuggingFace.
+        dinov3_model_name: HuggingFace model identifier for DINOv3.
         **kwargs: Additional arguments for AFNDeSeg.
 
     Returns:
         AFNDeSeg model instance.
+
+    Example:
+        >>> # Load with pretrained DINOv3 weights from HuggingFace
+        >>> model = create_afn_deseg(
+        ...     img_size=512,
+        ...     pretrained_dinov3=True,
+        ...     dinov3_model_name="facebook/dinov3-vitb16-pretrain-lvd1689m"
+        ... )
+
+        >>> # Load with local pretrained weights
+        >>> model = create_afn_deseg(
+        ...     img_size=512,
+        ...     pretrained_vit="/path/to/weights.pth"
+        ... )
     """
     model = AFNDeSeg(img_size=img_size, **kwargs)
 
-    if pretrained_vit is not None:
-        # Load pretrained ViT weights
+    # Load pretrained DINOv3 from HuggingFace
+    if pretrained_dinov3:
+        load_dinov3_weights(
+            model.vit_encoder,
+            model_name=dinov3_model_name
+        )
+
+    # Load local pretrained ViT weights (takes precedence over HuggingFace)
+    elif pretrained_vit is not None:
         state_dict = torch.load(pretrained_vit, map_location='cpu')
         # Filter and load only ViT encoder weights
         vit_state_dict = {
