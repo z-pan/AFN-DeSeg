@@ -353,6 +353,7 @@ def parse_args():
 
 
 def main():
+    """Entry point for AFN-DeSeg inference."""
     args = parse_args()
 
     # Initialize predictor

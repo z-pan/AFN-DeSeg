@@ -294,6 +294,7 @@ def print_results(results: Dict[str, float], title: str = "Evaluation Results"):
 
 
 def main():
+    """Entry point for AFN-DeSeg model evaluation."""
     parser = argparse.ArgumentParser(
         description='AFN-DeSeg Evaluation Script'
     )

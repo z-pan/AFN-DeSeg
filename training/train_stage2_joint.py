@@ -722,6 +722,7 @@ def parse_args():
 
 
 def main():
+    """Entry point for Stage 2 joint training."""
     args = parse_args()
 
     # Set random seed

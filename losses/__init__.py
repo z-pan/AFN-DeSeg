@@ -15,6 +15,7 @@ from .joint_loss import (
     SegmentationLoss,
     DiceLoss,
     PerceptualLoss,
+    PerceptualLossPlaceholder,
     CellposeFeatureExtractor
 )
 
@@ -25,5 +26,6 @@ __all__ = [
     'SegmentationLoss',
     'DiceLoss',
     'PerceptualLoss',
+    'PerceptualLossPlaceholder',
     'CellposeFeatureExtractor'
 ]

@@ -463,6 +463,7 @@ def parse_args():
 
 
 def main():
+    """Entry point for Stage 1 DINO domain adaptation training."""
     args = parse_args()
 
     # Set seed
