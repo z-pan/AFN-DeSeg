@@ -84,6 +84,16 @@ Thumbs.db
 checkpoints/
 outputs/
 logs/
+wandb/
+
+# Model weights (large files)
 *.pth
 *.pt
-wandb/
+*.safetensors
+*.ckpt
+*.bin
+
+# Checkpoint directory (keep README and .gitkeep)
+checkpoint/*
+!checkpoint/README.md
+!checkpoint/.gitkeep
