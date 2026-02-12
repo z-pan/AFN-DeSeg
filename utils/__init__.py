@@ -3,6 +3,7 @@ AFN-DeSeg Utilities.
 
 This module provides utility functions for:
 - Evaluation metrics (PSNR, SSIM, Dice, mAP, HD95, etc.)
+- KDA metrics (Key Area Fraction, nuclear density, correlation)
 - Visualization (training curves, result comparison)
 """
 
@@ -21,6 +22,23 @@ from .metrics import (
     compute_key_area_fraction,
     MetricTracker,
     evaluate_batch
+)
+
+from .kda_metrics import (
+    calculate_kaf,
+    calculate_kaf_per_region,
+    calculate_nuclear_density as calculate_kda_nuclear_density,
+    calculate_nuclear_density_map,
+    calculate_pearson_correlation,
+    calculate_bland_altman as calculate_kda_bland_altman,
+    correlation_analysis,
+    hausdorff_distance_95,
+    average_surface_distance,
+    calculate_dice as calculate_kda_dice,
+    calculate_iou as calculate_kda_iou,
+    calculate_sensitivity,
+    calculate_specificity,
+    evaluate_kda_prediction
 )
 
 from .visualization import (
@@ -50,6 +68,21 @@ __all__ = [
     'compute_key_area_fraction',
     'MetricTracker',
     'evaluate_batch',
+    # KDA Metrics
+    'calculate_kaf',
+    'calculate_kaf_per_region',
+    'calculate_kda_nuclear_density',
+    'calculate_nuclear_density_map',
+    'calculate_pearson_correlation',
+    'calculate_kda_bland_altman',
+    'correlation_analysis',
+    'hausdorff_distance_95',
+    'average_surface_distance',
+    'calculate_kda_dice',
+    'calculate_kda_iou',
+    'calculate_sensitivity',
+    'calculate_specificity',
+    'evaluate_kda_prediction',
     # Visualization
     'plot_image',
     'plot_comparison',

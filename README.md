@@ -21,6 +21,8 @@ AFN-DeSeg addresses the challenge of extracting diagnostic-grade nuclear feature
 
 ```
 AFN-DeSeg/
+├── checkpoint/                 # Model weights and checkpoints
+│   └── README.md               # Checkpoint documentation
 ├── configs/                    # Configuration files
 │   ├── __init__.py
 │   └── default_config.yaml
