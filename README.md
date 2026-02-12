@@ -6,7 +6,7 @@
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch 2.0+](https://img.shields.io/badge/pytorch-2.0+-red.svg)](https://pytorch.org/)
 
-A physics-informed deep learning framework for joint image denoising and nuclear segmentation of Two-Photon Autofluorescence (TPAF) microscopy images.
+A physics-informed deep learning framework for joint image denoising and nuclear segmentation of Two-Photon Autofluorescence (TPAF) microscopy images, with downstream Key Diagnostic Area (KDA) prediction for clinical cancer diagnosis.
 
 ## Overview
 
@@ -16,6 +16,7 @@ AFN-DeSeg addresses the challenge of extracting diagnostic-grade nuclear feature
 - **LoRA Adaptation**: Efficient fine-tuning of the ViT backbone with Low-Rank Adaptation (r=16, α=16)
 - **Joint Optimization**: Simultaneous denoising and segmentation with mutual reinforcement
 - **Physics-Informed Noise Model**: Mixed Poisson-Gaussian (MPG) noise synthesis based on real TPAF imaging characteristics
+- **KDA Prediction**: Attention U-Net for identifying high-tumor-burden regions
 
 ## Project Structure
 
@@ -25,7 +26,8 @@ AFN-DeSeg/
 │   └── README.md               # Checkpoint documentation
 ├── configs/                    # Configuration files
 │   ├── __init__.py
-│   └── default_config.yaml
+│   ├── default_config.yaml     # AFN-DeSeg configuration
+│   └── kda_config.yaml         # KDA model configuration
 ├── data/                       # Data processing and noise synthesis
 │   ├── __init__.py
 │   ├── augmentations.py        # Data augmentation pipelines
@@ -36,31 +38,66 @@ AFN-DeSeg/
 │   └── evaluate.py             # Comprehensive evaluation
 ├── inference/                  # Inference scripts
 │   ├── __init__.py
-│   └── predict.py              # Prediction utilities
+│   ├── predict.py              # AFN-DeSeg prediction
+│   └── kda_predictor.py        # KDA prediction
 ├── losses/                     # Loss functions
 │   ├── __init__.py
 │   └── joint_loss.py           # Joint denoising-segmentation loss
 ├── models/                     # Model architectures
 │   ├── __init__.py
-│   └── afn_deseg.py            # Main model architecture
+│   ├── afn_deseg.py            # Main AFN-DeSeg model
+│   ├── attention_gate.py       # Attention gate module
+│   └── attention_unet.py       # Attention U-Net for KDA
 ├── paper/                      # Reference paper and supplementary info
 ├── training/                   # Training scripts
 │   ├── __init__.py
 │   ├── train_stage1_dino.py    # Stage 1: DINO domain adaptation
-│   └── train_stage2_joint.py   # Stage 2: Joint training
+│   ├── train_stage2_joint.py   # Stage 2: Joint training
+│   └── kda_trainer.py          # KDA model training
 ├── utils/                      # Utility functions
 │   ├── __init__.py
 │   ├── metrics.py              # Evaluation metrics
+│   ├── kda_metrics.py          # KDA-specific metrics
 │   └── visualization.py        # Visualization utilities
 ├── tests/                      # Unit tests
+│   ├── test_attention_gate.py
+│   ├── test_attention_unet.py
 │   ├── test_data.py
 │   ├── test_losses.py
 │   ├── test_metrics.py
 │   └── test_model.py
 ├── LICENSE                     # MIT License
 ├── README.md
-└── requirements.txt
+├── requirements.txt
+└── code_availability_statement.md
 ```
+
+## System Requirements
+
+### Software Dependencies
+
+- Python >= 3.8
+- PyTorch >= 2.0.0
+- CUDA >= 11.7 (for GPU acceleration)
+
+Key dependencies:
+- `torch`, `torchvision` - Deep learning framework
+- `transformers`, `huggingface_hub` - DINOv3 ViT backbone
+- `cellpose` - Perceptual loss computation
+- `albumentations` - Data augmentation
+- `scikit-image`, `tifffile`, `scipy` - Image processing
+- `matplotlib` - Visualization
+
+### Hardware Requirements
+
+- **GPU**: NVIDIA GPU with >= 8GB VRAM (recommended: RTX 3090 or A100)
+- **RAM**: >= 32GB system memory
+- **Storage**: >= 10GB for code, models, and sample data
+
+### Installation Time
+
+- Fresh installation: ~10-15 minutes
+- With pre-downloaded model weights: ~5 minutes
 
 ## Installation
 
@@ -77,20 +114,6 @@ source venv/bin/activate  # Linux/Mac
 # Install dependencies
 pip install -r requirements.txt
 ```
-
-## Requirements
-
-- Python >= 3.8
-- PyTorch >= 2.0.0
-- CUDA-capable GPU (recommended)
-
-Key dependencies:
-- `torch`, `torchvision` - Deep learning framework
-- `transformers`, `huggingface_hub` - DINOv3 ViT backbone
-- `cellpose` - Perceptual loss computation
-- `albumentations` - Data augmentation
-- `scikit-image`, `tifffile`, `scipy` - Image processing
-- `matplotlib` - Visualization
 
 ## Usage
 
@@ -120,7 +143,7 @@ denoised, segmentation = model(input_image)
 ```bash
 python training/train_stage1_dino.py \
     --data_dir /path/to/unlabeled_tpaf \
-    --output_dir ./checkpoints/stage1 \
+    --output_dir ./checkpoint/stage1 \
     --epochs 50 \
     --batch_size 16
 ```
@@ -139,8 +162,8 @@ Run training:
 ```bash
 python training/train_stage2_joint.py \
     --data_dir /path/to/data \
-    --output_dir ./checkpoints/stage2 \
-    --pretrained_vit ./checkpoints/stage1/best_dino_encoder.pth \
+    --output_dir ./checkpoint/stage2 \
+    --pretrained_vit ./checkpoint/stage1/best_dino_encoder.pth \
     --epochs 150 \
     --batch_size 4 \
     --lr 1e-4
@@ -152,21 +175,42 @@ Training parameters (from paper):
 - Gradient clipping: max_norm=1.0
 - Early stopping: 20 epochs patience on validation Dice
 
+#### KDA Model Training
+
+```bash
+python training/kda_trainer.py \
+    --data_dir /path/to/kda_data \
+    --output_dir ./checkpoint/kda \
+    --epochs 100 \
+    --batch_size 8
+```
+
 ### Inference
+
+#### AFN-DeSeg Inference
 
 ```bash
 python inference/predict.py \
-    --checkpoint ./checkpoints/stage2/best_model.pth \
+    --checkpoint ./checkpoint/stage2/best_model.pth \
     --input /path/to/images \
     --output /path/to/results \
     --visualize
+```
+
+#### KDA Prediction
+
+```bash
+python inference/kda_predictor.py \
+    --checkpoint ./checkpoint/kda/kda_best.pth \
+    --input /path/to/nuclear_masks \
+    --output /path/to/kda_results
 ```
 
 ### Evaluation
 
 ```bash
 python evaluation/evaluate.py \
-    --checkpoint ./checkpoints/stage2/best_model.pth \
+    --checkpoint ./checkpoint/stage2/best_model.pth \
     --data_dir /path/to/test_data \
     --output_dir ./evaluation_results
 ```
@@ -179,19 +223,22 @@ pytest tests/ -v
 
 ## Model Architecture
 
-### Dual-Encoder
+### AFN-DeSeg: Dual-Encoder
+
 - **U-Net Encoder**: 4 down-sampling blocks (64→128→256→512 channels)
 - **DINOv3 Encoder**: ViT-Base with patch size 16, 768-dim embeddings, 12 transformer layers
   - Pretrained weights: `facebook/dinov3-vitb16-pretrain-lvd1689m`
   - LoRA adaptation on Query and Value matrices (r=16, α=16)
 
 ### Feature Fusion
+
 - Reshape ViT tokens to spatial format (32×32×768)
 - Bicubic upsample to match U-Net resolution
 - Concatenate (512 + 768 = 1280 channels)
 - Fuse via 1×1 + 3×3 convolutions
 
 ### Dual-Decoders
+
 - **Denoising Decoder**: Outputs single-channel intensity map
 - **Segmentation Decoder**: Outputs binary mask with sigmoid activation
 
@@ -204,13 +251,60 @@ Where:
 - $L_{seg}$: Dice + BCE segmentation loss (λ=10.0)
 - $L_{percep}$: MSE on frozen Cellpose cyto2 features (λ=0.1)
 
+### Attention U-Net for KDA
+
+- **Input**: Binary nuclear segmentation masks from AFN-DeSeg
+- **Architecture**: 4-level encoder-decoder with attention gates
+- **Output**: Key Diagnostic Area probability map
+- **Reference**: Oktay et al., "Attention U-Net", MIDL 2018
+
 ## Metrics
 
-The evaluation script computes:
-- **Image Restoration**: PSNR, SSIM
-- **Segmentation**: Dice Coefficient, IoU, mAP@IoU=0.5
-- **Nuclei Morphology**: Nuclear Area, Circularity, Density
-- **Clinical Validation**: HD95 (boundary precision), Bland-Altman analysis
+The evaluation scripts compute:
+
+**Image Restoration**:
+- PSNR (Peak Signal-to-Noise Ratio)
+- SSIM (Structural Similarity Index)
+
+**Segmentation**:
+- Dice Coefficient
+- IoU (Intersection over Union)
+- mAP@IoU=0.5
+
+**Nuclei Morphology**:
+- Nuclear Area
+- Circularity
+- Density
+
+**Clinical Validation**:
+- HD95 (95th percentile Hausdorff Distance)
+- Bland-Altman analysis
+- Key Area Fraction (KAF)
+- Nuclear density correlation (r=0.96)
+
+## Reproducibility
+
+### Random Seeds
+
+All experiments use fixed random seeds:
+```python
+torch.manual_seed(42)
+np.random.seed(42)
+torch.backends.cudnn.deterministic = True
+```
+
+### Expected Runtime
+
+- Training (Stage 2, 150 epochs): ~12-24 hours on single A100 GPU
+- Inference (per 512×512 image): ~50-100ms on GPU
+
+## Code Availability
+
+The complete source code is publicly available under the MIT License. See [code_availability_statement.md](code_availability_statement.md) for detailed information about:
+- Repository contents
+- System requirements
+- Reproducibility guidelines
+- Pretrained model weights
 
 ## License
 
@@ -220,3 +314,4 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 - DINOv3 pretrained weights from [Facebook Research](https://huggingface.co/collections/facebook/dinov3)
 - Cellpose for perceptual loss computation
+- Attention U-Net architecture from Oktay et al., MIDL 2018
