@@ -38,7 +38,8 @@ AFN-DeSeg/
 │   └── evaluate.py             # Comprehensive evaluation
 ├── inference/                  # Inference scripts
 │   ├── __init__.py
-│   ├── predict.py              # AFN-DeSeg prediction
+│   ├── predict.py              # Single-channel AFN-DeSeg prediction
+│   ├── multichannel_predict.py # Two-channel TPAF prediction
 │   └── kda_predictor.py        # KDA prediction
 ├── losses/                     # Loss functions
 │   ├── __init__.py
@@ -187,8 +188,42 @@ python training/kda_trainer.py \
 
 ### Inference
 
-#### AFN-DeSeg Inference
+#### Two-Channel TPAF Images (Recommended)
 
+For two-channel (red and green) TPAF images, use the multichannel predictor which:
+1. Processes each channel separately through AFN-DeSeg
+2. Outputs combined denoised images and instance segmentation masks
+3. Optionally runs KDA prediction
+
+```bash
+python inference/multichannel_predict.py \
+    --checkpoint ./checkpoint/stage2/best_model.pth \
+    --input /path/to/tpaf_images \
+    --output /path/to/results \
+    --format tif
+```
+
+With KDA prediction:
+```bash
+python inference/multichannel_predict.py \
+    --checkpoint ./checkpoint/stage2/best_model.pth \
+    --input /path/to/tpaf_images \
+    --output /path/to/results \
+    --run_kda --kda_checkpoint ./checkpoint/kda/kda_best.pth
+```
+
+**Input format**: Two-channel TPAF images (.tif, .png, .npy)
+- Shape: (H, W, 2) where channel 0 = red, channel 1 = green
+- Also accepts RGB images (extracts red and green channels)
+
+**Output**:
+- `denoised/`: Two-channel denoised images
+- `instance_masks/`: Instance segmentation masks (each nucleus has unique ID)
+- `kda_masks/`: Key Diagnostic Area predictions (if --run_kda)
+
+#### Single-Channel Inference
+
+For single-channel images:
 ```bash
 python inference/predict.py \
     --checkpoint ./checkpoint/stage2/best_model.pth \
@@ -197,7 +232,7 @@ python inference/predict.py \
     --visualize
 ```
 
-#### KDA Prediction
+#### KDA Prediction (Standalone)
 
 ```bash
 python inference/kda_predictor.py \
