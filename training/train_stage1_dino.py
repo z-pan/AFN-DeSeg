@@ -308,9 +308,11 @@ def train_stage1(args):
     dataset = TPAFUnlabeledDataset(
         args.data_dir,
         img_size=args.img_size,
-        transform=transform
+        transform=transform,
+        normalize=args.normalize,
+        split_channels=args.split_channels
     )
-    print(f"Dataset size: {len(dataset)} images")
+    print(f"Dataset size: {len(dataset)} samples")
 
     # Create dataloader
     dataloader = DataLoader(
@@ -420,6 +422,13 @@ def parse_args():
                         help='Output directory')
     parser.add_argument('--img_size', type=int, default=512,
                         help='Input image size')
+    parser.add_argument('--split_channels', action='store_true',
+                        help='Split multi-channel images (e.g. FAD+NADH) into '
+                             'separate grayscale samples. Empty channels are '
+                             'auto-skipped.')
+    parser.add_argument('--normalize', type=str, default='percentile',
+                        choices=['minmax', 'percentile', 'fixed'],
+                        help='Per-image normalization method (default: percentile)')
 
     # Model arguments
     parser.add_argument('--pretrained', type=str, default=None,
