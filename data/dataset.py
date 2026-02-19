@@ -246,11 +246,19 @@ class TPAFUnlabeledDataset(Dataset):
     """
     Unlabeled TPAF Dataset for self-supervised learning (Stage 1 DINO adaptation).
 
+    Supports multi-channel TPAF images (e.g., FAD + NADH) via split_channels.
+    When split_channels=True, each non-empty channel becomes a separate
+    grayscale training sample, which doubles the effective dataset size and
+    matches the per-channel processing used in Stage 2 and inference.
+
     Args:
         data_dir: Directory containing unlabeled TPAF images.
         img_size: Image size for cropping.
         transform: Optional transform/augmentation function.
         normalize: Normalization method.
+        split_channels: If True, split multi-channel images into separate
+            grayscale samples (one per non-empty channel). Empty channels
+            (max intensity < 1e-8) are automatically skipped.
     """
 
     def __init__(
@@ -258,18 +266,26 @@ class TPAFUnlabeledDataset(Dataset):
         data_dir: str,
         img_size: int = 512,
         transform: Optional[Callable] = None,
-        normalize: str = 'minmax'
+        normalize: str = 'minmax',
+        split_channels: bool = False
     ):
         self.data_dir = Path(data_dir)
         self.img_size = img_size
         self.transform = transform
         self.normalize = normalize
+        self.split_channels = split_channels
 
         # Get all image files
-        self.image_paths = self._get_image_paths()
+        image_paths = self._get_image_paths()
 
-        if len(self.image_paths) == 0:
+        if len(image_paths) == 0:
             raise ValueError(f"No images found in {self.data_dir}")
+
+        # Build sample index: list of (path, channel_index) tuples
+        if split_channels:
+            self.samples = self._build_channel_index(image_paths)
+        else:
+            self.samples = [(p, None) for p in image_paths]
 
     def _get_image_paths(self) -> List[Path]:
         """Get all image file paths."""
@@ -279,13 +295,75 @@ class TPAFUnlabeledDataset(Dataset):
             paths.extend(self.data_dir.glob(f'**/{ext}'))  # Recursive
         return sorted(set(paths))
 
+    def _build_channel_index(
+        self, image_paths: List[Path]
+    ) -> List[Tuple[Path, Optional[int]]]:
+        """
+        Build sample index for multi-channel images.
+
+        Detects channel layout from the first image, identifies which
+        channels contain signal, and creates one sample entry per
+        active channel per image.
+        """
+        first_img = load_image(image_paths[0])
+
+        if first_img.ndim == 2:
+            # Already grayscale, nothing to split
+            return [(p, None) for p in image_paths]
+
+        # Detect channel axis and find active (non-empty) channels
+        if first_img.shape[-1] <= 4:
+            # Channels-last (H, W, C)
+            n_channels = first_img.shape[-1]
+            active_channels = [
+                ch for ch in range(n_channels)
+                if first_img[:, :, ch].max() > 1e-8
+            ]
+            self._channels_last = True
+        elif first_img.shape[0] <= 4:
+            # Channels-first (C, H, W)
+            n_channels = first_img.shape[0]
+            active_channels = [
+                ch for ch in range(n_channels)
+                if first_img[ch].max() > 1e-8
+            ]
+            self._channels_last = False
+        else:
+            # Ambiguous shape, treat as grayscale
+            return [(p, None) for p in image_paths]
+
+        print(f"Detected {n_channels}-channel images, "
+              f"{len(active_channels)} active channel(s): {active_channels}")
+
+        samples = []
+        for path in image_paths:
+            for ch in active_channels:
+                samples.append((path, ch))
+
+        print(f"Split {len(image_paths)} images into "
+              f"{len(samples)} channel samples")
+
+        return samples
+
     def __len__(self) -> int:
-        return len(self.image_paths)
+        return len(self.samples)
 
     def __getitem__(self, idx: int) -> torch.Tensor:
+        path, channel = self.samples[idx]
+
         # Load image
-        img = load_image(self.image_paths[idx])
-        img = ensure_2d(img)
+        img = load_image(path)
+
+        # Extract specific channel or convert to 2D
+        if channel is not None:
+            if img.ndim == 3:
+                if hasattr(self, '_channels_last') and self._channels_last:
+                    img = img[:, :, channel]
+                else:
+                    img = img[channel]
+        else:
+            img = ensure_2d(img)
+
         img = normalize_image(img, self.normalize)
 
         # Apply transforms
