@@ -298,7 +298,11 @@ def train_stage1(args):
     # Load pretrained weights if provided
     if args.pretrained:
         print(f"Loading pretrained weights from {args.pretrained}")
-        state_dict = torch.load(args.pretrained, map_location=device)
+        if args.pretrained.endswith('.safetensors'):
+            from safetensors.torch import load_file
+            state_dict = load_file(args.pretrained, device=str(device))
+        else:
+            state_dict = torch.load(args.pretrained, map_location=device)
         student.load_state_dict(state_dict, strict=False)
         teacher.load_state_dict(state_dict, strict=False)
 
