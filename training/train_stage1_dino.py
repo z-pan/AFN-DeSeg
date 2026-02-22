@@ -7,9 +7,10 @@ This stage performs self-supervised training on unlabeled TPAF patches
 to adapt the DINOv3 backbone to the TPAF domain before joint training.
 
 Training Configuration:
-    - LoRA rank r=16, alpha=16 on Query and Value matrices
+    - LoRA rank r=32, alpha=32 on Query and Value matrices
     - 50 epochs with DINO student-teacher distillation
-    - Teacher EMA decay: 0.996
+    - Teacher EMA decay: 0.998
+    - Auto-detects bfloat16 on A100/H100 (falls back to float16 + GradScaler)
     - Multi-crop augmentation with intensity perturbations
 
 Usage:
@@ -148,8 +149,23 @@ class DINOTrainer:
         self.device = device
         self.ema_decay = ema_decay
 
-        # Mixed precision scaler
-        self.scaler = torch.cuda.amp.GradScaler(enabled=(device.type == 'cuda'))
+        # Auto-detect bfloat16 support (A100, H100, etc.)
+        self.use_bf16 = (
+            device.type == 'cuda'
+            and torch.cuda.is_bf16_supported()
+        )
+        self.amp_dtype = torch.bfloat16 if self.use_bf16 else torch.float16
+
+        if self.use_bf16:
+            print("  -> Using bfloat16 (A100/H100 detected). GradScaler disabled.")
+        else:
+            print("  -> Using float16 with GradScaler.")
+
+        # GradScaler is only needed for float16; bfloat16 has enough
+        # exponent range that loss scaling is unnecessary.
+        self.scaler = torch.cuda.amp.GradScaler(
+            enabled=(device.type == 'cuda' and not self.use_bf16)
+        )
 
         # Freeze teacher
         for param in self.teacher.parameters():
@@ -175,10 +191,10 @@ class DINOTrainer:
         """
         Train for one epoch.
 
-        Uses mixed precision (float16) and sequential view processing
-        to minimize GPU memory. Each view's loss is computed and
-        back-propagated independently so only one ViT computation
-        graph is held in memory at a time.
+        Uses mixed precision (bfloat16 on A100/H100, float16 otherwise)
+        and sequential view processing to minimize GPU memory. Each
+        view's loss is computed and back-propagated independently so
+        only one ViT computation graph is held in memory at a time.
 
         Args:
             dataloader: Training dataloader.
@@ -208,7 +224,7 @@ class DINOTrainer:
             view2_rgb = view2.repeat(1, 3, 1, 1) if view2.shape[1] == 1 else view2
 
             # Teacher forward for both views (no grad, low memory)
-            with torch.no_grad(), torch.cuda.amp.autocast():
+            with torch.no_grad(), torch.cuda.amp.autocast(dtype=self.amp_dtype):
                 teacher_feat1 = self.teacher(view1_rgb).mean(dim=1)
                 teacher_feat2 = self.teacher(view2_rgb).mean(dim=1)
 
@@ -217,14 +233,14 @@ class DINOTrainer:
             self.optimizer.zero_grad()
 
             # View 1: student predicts teacher of view 2
-            with torch.cuda.amp.autocast():
+            with torch.cuda.amp.autocast(dtype=self.amp_dtype):
                 student_feat1 = self.student(view1_rgb).mean(dim=1)
                 loss1 = self.criterion(student_feat1, teacher_feat2) / 2
             self.scaler.scale(loss1).backward()
             del student_feat1, loss1
 
             # View 2: student predicts teacher of view 1
-            with torch.cuda.amp.autocast():
+            with torch.cuda.amp.autocast(dtype=self.amp_dtype):
                 student_feat2 = self.student(view2_rgb).mean(dim=1)
                 loss2 = self.criterion(student_feat2, teacher_feat1) / 2
             self.scaler.scale(loss2).backward()
@@ -449,9 +465,9 @@ def parse_args():
     # Model arguments
     parser.add_argument('--pretrained', type=str, default=None,
                         help='Path to pretrained DINOv3 weights')
-    parser.add_argument('--lora_r', type=int, default=16,
+    parser.add_argument('--lora_r', type=int, default=32,
                         help='LoRA rank')
-    parser.add_argument('--lora_alpha', type=int, default=16,
+    parser.add_argument('--lora_alpha', type=int, default=32,
                         help='LoRA alpha')
     parser.add_argument('--train_full', action='store_true',
                         help='Train full encoder (not just LoRA)')
@@ -459,9 +475,9 @@ def parse_args():
     # Training arguments
     parser.add_argument('--epochs', type=int, default=50,
                         help='Number of training epochs')
-    parser.add_argument('--batch_size', type=int, default=16,
+    parser.add_argument('--batch_size', type=int, default=32,
                         help='Batch size')
-    parser.add_argument('--lr', type=float, default=1e-4,
+    parser.add_argument('--lr', type=float, default=2e-4,
                         help='Learning rate')
     parser.add_argument('--min_lr', type=float, default=1e-6,
                         help='Minimum learning rate')
@@ -469,7 +485,7 @@ def parse_args():
                         help='Weight decay')
 
     # DINO arguments
-    parser.add_argument('--ema_decay', type=float, default=0.996,
+    parser.add_argument('--ema_decay', type=float, default=0.998,
                         help='EMA decay for teacher')
     parser.add_argument('--teacher_temp', type=float, default=0.04,
                         help='Teacher temperature')
@@ -479,7 +495,7 @@ def parse_args():
                         help='Center momentum')
 
     # Other
-    parser.add_argument('--num_workers', type=int, default=4,
+    parser.add_argument('--num_workers', type=int, default=2,
                         help='Number of dataloader workers')
     parser.add_argument('--seed', type=int, default=42,
                         help='Random seed')
