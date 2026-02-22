@@ -19,9 +19,9 @@ model:
     depth: 12
     num_heads: 12
     patch_size: 16
-    # LoRA configuration
-    lora_r: 16
-    lora_alpha: 16
+    # LoRA configuration (r=32 optimal for A100 with ~4.5K samples)
+    lora_r: 32
+    lora_alpha: 32
 
 # =============================================================================
 # Data Configuration
@@ -63,12 +63,12 @@ loss:
 # =============================================================================
 stage1:
   epochs: 50
-  batch_size: 16
+  batch_size: 32  # A100 40GB supports 32 comfortably with LoRA
 
   # Optimizer
   optimizer:
     type: "AdamW"
-    lr: 1.0e-4
+    lr: 2.0e-4  # Scaled linearly with batch_size (2x batch -> 2x lr)
     weight_decay: 0.05
 
   # Scheduler
@@ -81,14 +81,14 @@ stage1:
     teacher_temp: 0.04
     student_temp: 0.1
     center_momentum: 0.9
-    ema_decay: 0.996  # Teacher EMA update
+    ema_decay: 0.998  # Slower EMA with larger batches for stability
 
 # =============================================================================
 # Stage 2: Joint Training (Section 4.2.3)
 # =============================================================================
 stage2:
   epochs: 150
-  batch_size: 4
+  batch_size: 8  # A100 40GB supports 8 for joint training
 
   # Optimizer
   optimizer:
@@ -124,7 +124,7 @@ inference:
 # =============================================================================
 hardware:
   device: "cuda"  # cuda or cpu
-  num_workers: 4
+  num_workers: 2  # Colab typically provides 2 CPU cores
   pin_memory: true
   seed: 42
 
