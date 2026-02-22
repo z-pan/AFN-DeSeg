@@ -18,6 +18,36 @@ except ImportError:
 
 
 # =============================================================================
+# Version-adaptive helpers for albumentations API changes
+# =============================================================================
+
+def _random_resized_crop(h, w, **kwargs):
+    """Create RandomResizedCrop compatible with any albumentations version."""
+    try:
+        return A.RandomResizedCrop(size=(h, w), **kwargs)
+    except (TypeError, ValueError):
+        return A.RandomResizedCrop(height=h, width=w, **kwargs)
+
+
+def _center_crop(h, w):
+    """Create CenterCrop compatible with any albumentations version."""
+    try:
+        return A.CenterCrop(height=h, width=w)
+    except (TypeError, ValueError):
+        return A.CenterCrop(size=(h, w))
+
+
+def _pad_if_needed(min_h, min_w, border_mode=0, fill_value=0):
+    """Create PadIfNeeded compatible with any albumentations version."""
+    try:
+        return A.PadIfNeeded(min_height=min_h, min_width=min_w,
+                             border_mode=border_mode, fill=fill_value)
+    except (TypeError, ValueError):
+        return A.PadIfNeeded(min_height=min_h, min_width=min_w,
+                             border_mode=border_mode, value=fill_value)
+
+
+# =============================================================================
 # Custom Transforms
 # =============================================================================
 
@@ -106,10 +136,9 @@ if HAS_ALBUMENTATIONS:
 
             # Global crop transform
             self.global_transform = A.Compose([
-                A.RandomResizedCrop(
-                    size=(global_crop_size, global_crop_size),
-                    scale=global_crop_scale,
-                    ratio=(0.75, 1.33)
+                _random_resized_crop(
+                    global_crop_size, global_crop_size,
+                    scale=global_crop_scale, ratio=(0.75, 1.33)
                 ),
                 A.HorizontalFlip(p=0.5),
                 A.VerticalFlip(p=0.5),
@@ -118,10 +147,9 @@ if HAS_ALBUMENTATIONS:
 
             # Local crop transform
             self.local_transform = A.Compose([
-                A.RandomResizedCrop(
-                    size=(local_crop_size, local_crop_size),
-                    scale=local_crop_scale,
-                    ratio=(0.75, 1.33)
+                _random_resized_crop(
+                    local_crop_size, local_crop_size,
+                    scale=local_crop_scale, ratio=(0.75, 1.33)
                 ),
                 A.HorizontalFlip(p=0.5),
                 A.VerticalFlip(p=0.5),
@@ -190,13 +218,8 @@ def get_train_transform(img_size: int = 512) -> Any:
             ),
 
             # Ensure correct size
-            A.PadIfNeeded(
-                min_height=img_size,
-                min_width=img_size,
-                border_mode=0,  # cv2.BORDER_CONSTANT
-                fill=0
-            ),
-            A.CenterCrop(size=(img_size, img_size)),
+            _pad_if_needed(img_size, img_size),
+            _center_crop(img_size, img_size),
         ],
         additional_targets={'clean': 'image', 'mask': 'mask'}
     )
@@ -217,13 +240,8 @@ def get_val_transform(img_size: int = 512) -> Any:
 
     return A.Compose(
         [
-            A.PadIfNeeded(
-                min_height=img_size,
-                min_width=img_size,
-                border_mode=0,
-                fill=0
-            ),
-            A.CenterCrop(size=(img_size, img_size)),
+            _pad_if_needed(img_size, img_size),
+            _center_crop(img_size, img_size),
         ],
         additional_targets={'clean': 'image', 'mask': 'mask'}
     )
@@ -258,21 +276,14 @@ def get_dino_transform(img_size: int = 512) -> Any:
         ),
 
         # Random crop for multi-scale learning
-        A.RandomResizedCrop(
-            size=(img_size, img_size),
-            scale=(0.5, 1.0),
-            ratio=(0.75, 1.33),
-            p=0.5
+        _random_resized_crop(
+            img_size, img_size,
+            scale=(0.5, 1.0), ratio=(0.75, 1.33), p=0.5
         ),
 
         # Ensure correct size
-        A.PadIfNeeded(
-            min_height=img_size,
-            min_width=img_size,
-            border_mode=0,
-            fill=0
-        ),
-        A.CenterCrop(size=(img_size, img_size)),
+        _pad_if_needed(img_size, img_size),
+        _center_crop(img_size, img_size),
 
         # Optional Gaussian noise
         GaussianNoisePerturbation(var_limit=(0.001, 0.005), p=0.3),
