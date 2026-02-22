@@ -34,10 +34,9 @@ if HAS_ALBUMENTATIONS:
             self,
             brightness_limit: float = 0.2,
             contrast_limit: float = 0.2,
-            always_apply: bool = False,
             p: float = 0.5
         ):
-            super().__init__(always_apply, p)
+            super().__init__(p=p)
             self.brightness_limit = brightness_limit
             self.contrast_limit = contrast_limit
 
@@ -68,10 +67,9 @@ if HAS_ALBUMENTATIONS:
         def __init__(
             self,
             var_limit: Tuple[float, float] = (0.001, 0.01),
-            always_apply: bool = False,
             p: float = 0.5
         ):
-            super().__init__(always_apply, p)
+            super().__init__(p=p)
             self.var_limit = var_limit
 
         def apply(self, img: np.ndarray, **params) -> np.ndarray:
@@ -109,8 +107,7 @@ if HAS_ALBUMENTATIONS:
             # Global crop transform
             self.global_transform = A.Compose([
                 A.RandomResizedCrop(
-                    height=global_crop_size,
-                    width=global_crop_size,
+                    size=(global_crop_size, global_crop_size),
                     scale=global_crop_scale,
                     ratio=(0.75, 1.33)
                 ),
@@ -122,8 +119,7 @@ if HAS_ALBUMENTATIONS:
             # Local crop transform
             self.local_transform = A.Compose([
                 A.RandomResizedCrop(
-                    height=local_crop_size,
-                    width=local_crop_size,
+                    size=(local_crop_size, local_crop_size),
                     scale=local_crop_scale,
                     ratio=(0.75, 1.33)
                 ),
@@ -198,9 +194,9 @@ def get_train_transform(img_size: int = 512) -> Any:
                 min_height=img_size,
                 min_width=img_size,
                 border_mode=0,  # cv2.BORDER_CONSTANT
-                value=0
+                fill=0
             ),
-            A.CenterCrop(height=img_size, width=img_size),
+            A.CenterCrop(size=(img_size, img_size)),
         ],
         additional_targets={'clean': 'image', 'mask': 'mask'}
     )
@@ -225,9 +221,9 @@ def get_val_transform(img_size: int = 512) -> Any:
                 min_height=img_size,
                 min_width=img_size,
                 border_mode=0,
-                value=0
+                fill=0
             ),
-            A.CenterCrop(height=img_size, width=img_size),
+            A.CenterCrop(size=(img_size, img_size)),
         ],
         additional_targets={'clean': 'image', 'mask': 'mask'}
     )
@@ -263,8 +259,7 @@ def get_dino_transform(img_size: int = 512) -> Any:
 
         # Random crop for multi-scale learning
         A.RandomResizedCrop(
-            height=img_size,
-            width=img_size,
+            size=(img_size, img_size),
             scale=(0.5, 1.0),
             ratio=(0.75, 1.33),
             p=0.5
@@ -275,9 +270,9 @@ def get_dino_transform(img_size: int = 512) -> Any:
             min_height=img_size,
             min_width=img_size,
             border_mode=0,
-            value=0
+            fill=0
         ),
-        A.CenterCrop(height=img_size, width=img_size),
+        A.CenterCrop(size=(img_size, img_size)),
 
         # Optional Gaussian noise
         GaussianNoisePerturbation(var_limit=(0.001, 0.005), p=0.3),

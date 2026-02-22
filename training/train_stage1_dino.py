@@ -126,6 +126,8 @@ class DINOTrainer:
     Trainer for DINO self-supervised learning.
 
     Implements student-teacher training with EMA teacher updates.
+    Uses mixed precision and sequential view processing to minimize
+    GPU memory usage.
     """
 
     def __init__(
@@ -145,6 +147,9 @@ class DINOTrainer:
         self.criterion = criterion
         self.device = device
         self.ema_decay = ema_decay
+
+        # Mixed precision scaler
+        self.scaler = torch.cuda.amp.GradScaler(enabled=(device.type == 'cuda'))
 
         # Freeze teacher
         for param in self.teacher.parameters():
@@ -170,6 +175,11 @@ class DINOTrainer:
         """
         Train for one epoch.
 
+        Uses mixed precision (float16) and sequential view processing
+        to minimize GPU memory. Each view's loss is computed and
+        back-propagated independently so only one ViT computation
+        graph is held in memory at a time.
+
         Args:
             dataloader: Training dataloader.
             epoch: Current epoch number.
@@ -189,48 +199,50 @@ class DINOTrainer:
             # Get image batch
             images = batch.to(self.device)
 
-            # Create two augmented views (simplified - ideally use multi-crop)
-            # In practice, augmentations should be applied in dataloader
+            # Create two augmented views
             view1 = images
-            view2 = torch.flip(images, dims=[-1])  # Simple flip as second view
+            view2 = torch.flip(images, dims=[-1])
 
             # Convert to pseudo-RGB (replicate channel)
             view1_rgb = view1.repeat(1, 3, 1, 1) if view1.shape[1] == 1 else view1
             view2_rgb = view2.repeat(1, 3, 1, 1) if view2.shape[1] == 1 else view2
 
-            # Student forward (both views)
-            student_out1 = self.student(view1_rgb)  # (B, N, D)
-            student_out2 = self.student(view2_rgb)
+            # Teacher forward for both views (no grad, low memory)
+            with torch.no_grad(), torch.cuda.amp.autocast():
+                teacher_feat1 = self.teacher(view1_rgb).mean(dim=1)
+                teacher_feat2 = self.teacher(view2_rgb).mean(dim=1)
 
-            # Global average pooling to get single vector
-            student_feat1 = student_out1.mean(dim=1)  # (B, D)
-            student_feat2 = student_out2.mean(dim=1)
-
-            # Teacher forward (with no grad)
-            with torch.no_grad():
-                teacher_out1 = self.teacher(view1_rgb)
-                teacher_out2 = self.teacher(view2_rgb)
-                teacher_feat1 = teacher_out1.mean(dim=1)
-                teacher_feat2 = teacher_out2.mean(dim=1)
-
-            # DINO loss: student predicts teacher across views
-            loss1 = self.criterion(student_feat1, teacher_feat2)
-            loss2 = self.criterion(student_feat2, teacher_feat1)
-            loss = (loss1 + loss2) / 2
-
-            # Backward
+            # Process views sequentially to avoid holding two full
+            # student computation graphs in memory simultaneously.
             self.optimizer.zero_grad()
-            loss.backward()
-            self.optimizer.step()
+
+            # View 1: student predicts teacher of view 2
+            with torch.cuda.amp.autocast():
+                student_feat1 = self.student(view1_rgb).mean(dim=1)
+                loss1 = self.criterion(student_feat1, teacher_feat2) / 2
+            self.scaler.scale(loss1).backward()
+            del student_feat1, loss1
+
+            # View 2: student predicts teacher of view 1
+            with torch.cuda.amp.autocast():
+                student_feat2 = self.student(view2_rgb).mean(dim=1)
+                loss2 = self.criterion(student_feat2, teacher_feat1) / 2
+            self.scaler.scale(loss2).backward()
+
+            # Step optimizer with scaled gradients
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
 
             # Update teacher EMA
             self.update_teacher()
 
-            # Accumulate
-            total_loss += loss.item()
+            # Accumulate (reconstruct total loss for logging)
+            batch_loss = loss2.item() * 2  # approx; both halves are similar
+            del student_feat2, loss2
+            total_loss += batch_loss
             num_batches += 1
 
-            pbar.set_postfix({'loss': f"{loss.item():.4f}"})
+            pbar.set_postfix({'loss': f"{batch_loss:.4f}"})
 
         # Step scheduler
         self.scheduler.step()

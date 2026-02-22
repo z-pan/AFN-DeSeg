@@ -303,7 +303,9 @@ class TPAFUnlabeledDataset(Dataset):
 
         Detects channel layout from the first image, identifies which
         channels contain signal, and creates one sample entry per
-        active channel per image.
+        active channel per image. Validates channel bounds per-image
+        to handle datasets with mixed channel counts (e.g., RGB and
+        RGBA files).
         """
         first_img = load_image(image_paths[0])
 
@@ -311,13 +313,16 @@ class TPAFUnlabeledDataset(Dataset):
             # Already grayscale, nothing to split
             return [(p, None) for p in image_paths]
 
-        # Detect channel axis and find active (non-empty) channels
+        # Detect channel axis and find active channels.
+        # A channel is active if it is non-empty (max > 1e-8) and contains
+        # actual signal (not constant, like an alpha/opacity channel).
         if first_img.shape[-1] <= 4:
             # Channels-last (H, W, C)
             n_channels = first_img.shape[-1]
             active_channels = [
                 ch for ch in range(n_channels)
                 if first_img[:, :, ch].max() > 1e-8
+                and first_img[:, :, ch].std() > 1e-8
             ]
             self._channels_last = True
         elif first_img.shape[0] <= 4:
@@ -326,6 +331,7 @@ class TPAFUnlabeledDataset(Dataset):
             active_channels = [
                 ch for ch in range(n_channels)
                 if first_img[ch].max() > 1e-8
+                and first_img[ch].std() > 1e-8
             ]
             self._channels_last = False
         else:
@@ -335,15 +341,44 @@ class TPAFUnlabeledDataset(Dataset):
         print(f"Detected {n_channels}-channel images, "
               f"{len(active_channels)} active channel(s): {active_channels}")
 
+        # Build index, validating channel bounds per-image to handle
+        # mixed channel counts (e.g., some RGB, some RGBA)
         samples = []
+        skipped = 0
         for path in image_paths:
+            n_ch = self._get_num_channels(path)
             for ch in active_channels:
-                samples.append((path, ch))
+                if ch < n_ch:
+                    samples.append((path, ch))
+                else:
+                    skipped += 1
 
         print(f"Split {len(image_paths)} images into "
-              f"{len(samples)} channel samples")
+              f"{len(samples)} channel samples"
+              + (f" (skipped {skipped} out-of-bounds entries)" if skipped else ""))
 
         return samples
+
+    def _get_num_channels(self, path: Path) -> int:
+        """Get number of channels from image file without loading full data."""
+        try:
+            if path.suffix in ['.tif', '.tiff'] and HAS_TIFFFILE:
+                with tifffile.TiffFile(str(path)) as tif:
+                    shape = tif.pages[0].shape
+            elif path.suffix == '.npy':
+                shape = np.load(str(path), mmap_mode='r').shape
+            else:
+                shape = load_image(path).shape
+        except Exception:
+            shape = load_image(path).shape
+
+        if len(shape) == 2:
+            return 1
+        if shape[-1] <= 4:
+            return shape[-1]
+        if shape[0] <= 4:
+            return shape[0]
+        return 1
 
     def __len__(self) -> int:
         return len(self.samples)
