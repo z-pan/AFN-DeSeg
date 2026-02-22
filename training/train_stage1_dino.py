@@ -29,6 +29,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from safetensors.torch import save_file
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -416,16 +417,16 @@ def train_stage1(args):
         # Save best model
         if metrics['loss'] < best_loss:
             best_loss = metrics['loss']
-            torch.save(
+            save_file(
                 student.state_dict(),
-                output_dir / 'best_dino_encoder.pth'
+                output_dir / 'best_dino_encoder.safetensors'
             )
             print(f"  -> New best model saved (Loss: {best_loss:.4f})")
 
         # Save latest
-        torch.save(
+        save_file(
             student.state_dict(),
-            output_dir / 'latest_dino_encoder.pth'
+            output_dir / 'latest_dino_encoder.safetensors'
         )
 
         # Save history
@@ -435,7 +436,7 @@ def train_stage1(args):
     print("\n" + "=" * 60)
     print("Stage 1 training completed!")
     print(f"Best loss: {best_loss:.4f}")
-    print(f"Encoder saved to: {output_dir / 'best_dino_encoder.pth'}")
+    print(f"Encoder saved to: {output_dir / 'best_dino_encoder.safetensors'}")
 
 
 # =============================================================================
