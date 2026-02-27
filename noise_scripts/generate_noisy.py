@@ -10,7 +10,7 @@ Usage
 -----
 ::
 
-    python scripts/generate_noisy.py \\
+    python noise_scripts/generate_noisy.py \\
         --clean_dir  data/clean_images/ \\
         --params_file  outputs/noise_params.json \\
         --n_frames  1 4 8 16 \\
@@ -19,7 +19,7 @@ Usage
 
 Arguments
 ---------
-See ``python scripts/generate_noisy.py --help`` for the full list.
+See ``python noise_scripts/generate_noisy.py --help`` for the full list.
 
 Output layout
 -------------
@@ -58,8 +58,8 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 _PROJECT_ROOT = _SCRIPT_DIR.parent
 sys.path.insert(0, str(_PROJECT_ROOT))
 
-from src.noise_generator import PoissonGaussianGenerator
-from src.visualization import plot_noise_level_comparison
+from noise_lib.noise_generator import PoissonGaussianGenerator
+from noise_lib.visualization import plot_noise_level_comparison
 
 
 # ---------------------------------------------------------------------------

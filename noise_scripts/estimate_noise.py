@@ -10,7 +10,7 @@ Usage
 -----
 ::
 
-    python scripts/estimate_noise.py \\
+    python noise_scripts/estimate_noise.py \\
         --data_dir  data/ \\
         --output_dir  outputs/ \\
         --n_bins  200 \\
@@ -20,7 +20,7 @@ Usage
 
 Arguments
 ---------
-See ``python scripts/estimate_noise.py --help`` for the full list.
+See ``python noise_scripts/estimate_noise.py --help`` for the full list.
 """
 
 import argparse
@@ -38,8 +38,8 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 _PROJECT_ROOT = _SCRIPT_DIR.parent
 sys.path.insert(0, str(_PROJECT_ROOT))
 
-from src.noise_model import PoissonGaussianEstimator
-from src.visualization import (
+from noise_lib.noise_model import PoissonGaussianEstimator
+from noise_lib.visualization import (
     plot_mean_variance_curve,
     plot_per_group_consistency,
     plot_residual_distribution,
