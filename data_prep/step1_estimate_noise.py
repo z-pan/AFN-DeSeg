@@ -5,19 +5,37 @@ Step 1: Estimate Poisson-Gaussian noise parameters from calibration images.
 Wraps noise_scripts/estimate_noise.py with automatic quality checks so that
 problematic fits are flagged before downstream data generation.
 
-Expected calibration data layout
----------------------------------
-Each immediate subdirectory of ``--calibration_dir`` must contain exactly four
-multi-frame average images acquired from the **same field of view**::
+Two calibration directory layouts are supported via ``--calibration_layout``:
 
-    calibration_dir/
-        fov_001/
-            avg1.tif    # 1-frame average  (highest noise)
-            avg4.tif    # 4-frame average
-            avg8.tif    # 8-frame average
-            avg16.tif   # 16-frame average (used as clean reference)
-        fov_002/
-            ...
+per_fov (default)
+    Each subdirectory is one field of view, containing all four averaging levels::
+
+        calibration_dir/
+            fov_001/
+                avg1.tif    # 1-frame average  (highest noise)
+                avg4.tif    # 4-frame average
+                avg8.tif    # 8-frame average
+                avg16.tif   # 16-frame average (clean reference)
+            fov_002/
+                ...
+
+per_level  ← use this for the actual data
+    Each subdirectory is one averaging level, containing all FOVs as files::
+
+        calibration_dir/
+            avg_1/
+                fov_001.tif
+                fov_002.tif
+                ...
+            avg_4/
+                fov_001.tif
+                fov_002.tif
+                ...
+            avg_8/   ...
+            avg_16/  ...
+
+    The script automatically reorganises this into the per_fov layout (using
+    symlinks in a temporary directory) before running estimation.
 
 Usage
 -----
@@ -25,6 +43,7 @@ Usage
 
     python data_prep/step1_estimate_noise.py \\
         --calibration_dir /path/to/calibration \\
+        --calibration_layout per_level \\
         --output_dir      outputs/noise_estimation
 
 Outputs
@@ -54,10 +73,22 @@ import argparse
 import json
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_PROJECT_ROOT))
+
+# ---------------------------------------------------------------------------
+# per_level layout: map directory name patterns → N value
+# Accepts avg_1 / avg1 / avg_01 / avg01 etc.
+# ---------------------------------------------------------------------------
+_LEVEL_NAMES: dict = {
+    1:  {'avg_1',  'avg1',  'avg_01',  'avg01'},
+    4:  {'avg_4',  'avg4',  'avg_04',  'avg04'},
+    8:  {'avg_8',  'avg8',  'avg_08',  'avg08'},
+    16: {'avg_16', 'avg16', 'avg_016', 'avg016'},
+}
 
 # ---------------------------------------------------------------------------
 # Quality thresholds
@@ -84,8 +115,15 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         '--calibration_dir', required=True,
-        help='Root directory whose immediate subdirectories are calibration groups '
-             '(each containing avg1.tif, avg4.tif, avg8.tif, avg16.tif).',
+        help='Root directory containing calibration images.',
+    )
+    p.add_argument(
+        '--calibration_layout', choices=['per_fov', 'per_level'], default='per_level',
+        help=(
+            'Directory layout. '
+            '"per_level": subdirs are avg_1/, avg_4/, avg_8/, avg_16/ (actual data). '
+            '"per_fov": subdirs are one per FOV, each containing avg1/4/8/16.tif.'
+        ),
     )
     p.add_argument(
         '--output_dir', default='outputs/noise_estimation',
@@ -106,20 +144,14 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 # ---------------------------------------------------------------------------
-# Calibration directory structure validation
+# Calibration directory structure validation and layout reorganisation
 # ---------------------------------------------------------------------------
 
-def _validate_calibration_dir(calibration_dir: str) -> bool:
-    """Check that the calibration directory has the expected structure."""
-    root = Path(calibration_dir)
-    if not root.exists():
-        print(f"[ERROR] calibration_dir does not exist: {root}")
-        return False
-
+def _validate_per_fov(root: Path) -> bool:
+    """Validate per_fov layout: each subdir must contain avg1/4/8/16.tif."""
     subdirs = [d for d in root.iterdir() if d.is_dir()]
     if not subdirs:
         print(f"[ERROR] calibration_dir has no subdirectories: {root}")
-        print("        Each subdirectory should contain avg1/4/8/16.tif for one FOV.")
         return False
 
     required = ['avg1.tif', 'avg4.tif', 'avg8.tif', 'avg16.tif']
@@ -127,36 +159,153 @@ def _validate_calibration_dir(calibration_dir: str) -> bool:
     for d in sorted(subdirs):
         missing = [f for f in required if not (d / f).exists()]
         if missing:
-            print(f"  [WARN] Group '{d.name}' is missing: {missing} — will be skipped by estimator.")
+            print(f"  [WARN] Group '{d.name}' missing: {missing} — will be skipped.")
         else:
             n_complete += 1
 
     print(f"\n{BANNER}")
-    print("CALIBRATION DIRECTORY CHECK")
-    print(f"  Total subdirectories : {len(subdirs)}")
-    print(f"  Complete groups      : {n_complete}  (all 4 avg files present)")
-    print(f"  Incomplete groups    : {len(subdirs) - n_complete}  (will be skipped)")
+    print("CALIBRATION DIRECTORY CHECK  (layout: per_fov)")
+    print(f"  Subdirectories (FOVs)   : {len(subdirs)}")
+    print(f"  Complete groups         : {n_complete}  (all 4 avg files present)")
+    print(f"  Incomplete / skipped    : {len(subdirs) - n_complete}")
     print(BANNER)
 
     if n_complete == 0:
         print("[ERROR] No complete calibration groups found.")
         return False
     if n_complete < 3:
-        print("[WARN]  Fewer than 3 complete groups — parameter estimate may be unreliable.")
-        print("        Recommended: ≥ 5 groups from different fields of view.")
-
+        print("[WARN]  Fewer than 3 complete groups — estimate may be unreliable.")
+        print("        Recommended: ≥ 5 groups.")
     return True
+
+
+def _validate_per_level(root: Path) -> bool:
+    """Validate per_level layout: avg_1/, avg_4/, avg_8/, avg_16/ must exist."""
+    found_n: dict = {}
+    for n, names in _LEVEL_NAMES.items():
+        for d in root.iterdir():
+            if d.is_dir() and d.name.lower() in names:
+                found_n[n] = d
+                break
+
+    missing = sorted({1, 4, 8, 16} - set(found_n.keys()))
+    if missing:
+        print(f"[ERROR] Cannot find level directories for N={missing}.")
+        print(f"        Expected subdirectory names (case-insensitive):")
+        for n in missing:
+            print(f"          N={n}: one of {_LEVEL_NAMES[n]}")
+        print(f"        Found subdirectories: {[d.name for d in root.iterdir() if d.is_dir()]}")
+        return False
+
+    # Count FOVs per level and check they match
+    fov_counts = {}
+    for n, d in found_n.items():
+        exts = {'.tif', '.tiff', '.npy'}
+        stems = {f.stem for f in d.iterdir() if f.suffix.lower() in exts}
+        fov_counts[n] = stems
+
+    complete_fovs = set.intersection(*fov_counts.values())
+    total_fovs = set.union(*fov_counts.values())
+
+    print(f"\n{BANNER}")
+    print("CALIBRATION DIRECTORY CHECK  (layout: per_level)")
+    for n in sorted(found_n):
+        d = found_n[n]
+        cnt = len(fov_counts[n])
+        print(f"  N={n:2d}  ({d.name}/) : {cnt} FOV files")
+    print(f"  Complete FOVs (present in all 4 levels) : {len(complete_fovs)}")
+    if len(complete_fovs) < len(total_fovs):
+        missing_fovs = total_fovs - complete_fovs
+        print(f"  Partial FOVs (missing from ≥1 level)    : {len(missing_fovs)}"
+              f"  (will be skipped)")
+        print(f"  Examples: {sorted(missing_fovs)[:3]}")
+    print(BANNER)
+
+    if len(complete_fovs) == 0:
+        print("[ERROR] No FOV appears in all four level directories.")
+        print("        Check that filenames match across avg_1/, avg_4/, avg_8/, avg_16/.")
+        return False
+    if len(complete_fovs) < 3:
+        print("[WARN]  Only", len(complete_fovs), "complete FOVs — estimate may be unreliable.")
+        print("        Recommended: ≥ 5 FOVs.")
+    return True
+
+
+def _reorganize_per_level_to_per_fov(calibration_dir: str, tmp_dir: Path) -> str:
+    """
+    Build a temporary per_fov directory from a per_level calibration layout.
+
+    Creates symlinks::
+
+        tmp_dir/
+            fov_001/
+                avg1.tif  →  calibration_dir/avg_1/fov_001.tif
+                avg4.tif  →  calibration_dir/avg_4/fov_001.tif
+                avg8.tif  →  calibration_dir/avg_8/fov_001.tif
+                avg16.tif →  calibration_dir/avg_16/fov_001.tif
+            fov_002/
+                ...
+
+    Returns the path to tmp_dir (the per_fov root).
+    """
+    root = Path(calibration_dir)
+    exts = {'.tif', '.tiff', '.npy'}
+
+    # Locate the four level directories
+    level_dirs: dict = {}
+    for n, names in _LEVEL_NAMES.items():
+        for d in root.iterdir():
+            if d.is_dir() and d.name.lower() in names:
+                level_dirs[n] = d
+                break
+
+    # Collect FOV stems per level
+    fov_stems_per_level = {
+        n: {f.stem: f for f in d.iterdir() if f.suffix.lower() in exts}
+        for n, d in level_dirs.items()
+    }
+
+    # Intersect across all levels
+    complete_fovs = set.intersection(
+        *[set(s.keys()) for s in fov_stems_per_level.values()]
+    )
+
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    for stem in sorted(complete_fovs):
+        fov_dir = tmp_dir / stem
+        fov_dir.mkdir(exist_ok=True)
+        for n, stem_map in fov_stems_per_level.items():
+            src = stem_map[stem]
+            # Destination name must match what noise_model.py expects: avg1.tif etc.
+            dst = fov_dir / f"avg{n}.tif"
+            if not dst.exists():
+                dst.symlink_to(src.resolve())
+
+    print(f"  Reorganised {len(complete_fovs)} FOVs into temporary per_fov layout:")
+    print(f"  {tmp_dir}")
+    return str(tmp_dir)
+
+
+def _validate_calibration_dir(calibration_dir: str, layout: str) -> bool:
+    """Dispatch to the appropriate layout validator."""
+    root = Path(calibration_dir)
+    if not root.exists():
+        print(f"[ERROR] calibration_dir does not exist: {root}")
+        return False
+    if layout == 'per_level':
+        return _validate_per_level(root)
+    return _validate_per_fov(root)
 
 
 # ---------------------------------------------------------------------------
 # Run underlying estimation script
 # ---------------------------------------------------------------------------
 
-def _run_estimation(args) -> int:
+def _run_estimation(args, data_dir: str) -> int:
     script = _PROJECT_ROOT / 'noise_scripts' / 'estimate_noise.py'
     cmd = [
         sys.executable, str(script),
-        '--data_dir', args.calibration_dir,
+        '--data_dir', data_dir,
         '--output_dir', args.output_dir,
         '--n_bins', str(args.n_bins),
         '--min_samples_per_bin', str(args.min_samples_per_bin),
@@ -171,8 +320,8 @@ def _run_estimation(args) -> int:
 
     print(f"\n{BANNER}")
     print("RUNNING: noise_scripts/estimate_noise.py")
-    print(f"  calibration_dir : {args.calibration_dir}")
-    print(f"  output_dir      : {args.output_dir}")
+    print(f"  data_dir   : {data_dir}")
+    print(f"  output_dir : {args.output_dir}")
     print(f"  n_bins          : {args.n_bins}")
     print(f"  min_samples     : {args.min_samples_per_bin}")
     print(f"  bg_percentile   : {args.background_percentile}")
@@ -298,19 +447,34 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
 
     # Pre-flight check
-    if not _validate_calibration_dir(args.calibration_dir):
+    if not _validate_calibration_dir(args.calibration_dir, args.calibration_layout):
         return 1
 
-    # Run estimation
-    rc = _run_estimation(args)
-    if rc != 0:
-        print(f"\n[ERROR] estimate_noise.py exited with code {rc}.")
-        print("        Check the output above for error messages.")
-        return rc
+    # For per_level layout, reorganise into a temporary per_fov directory
+    tmp_dir_obj = None
+    data_dir = args.calibration_dir
+    if args.calibration_layout == 'per_level':
+        print(f"\n{BANNER}")
+        print("REORGANISING per_level → per_fov (symlinks in temp directory) …")
+        tmp_dir_obj = tempfile.TemporaryDirectory(prefix='afn_calib_')
+        tmp_path = Path(tmp_dir_obj.name)
+        data_dir = _reorganize_per_level_to_per_fov(args.calibration_dir, tmp_path)
+        print(BANNER)
 
-    # Quality check
-    ok = _quality_check(args.output_dir)
-    return 0 if ok else 1
+    try:
+        # Run estimation
+        rc = _run_estimation(args, data_dir)
+        if rc != 0:
+            print(f"\n[ERROR] estimate_noise.py exited with code {rc}.")
+            print("        Check the output above for error messages.")
+            return rc
+
+        # Quality check
+        ok = _quality_check(args.output_dir)
+        return 0 if ok else 1
+    finally:
+        if tmp_dir_obj is not None:
+            tmp_dir_obj.cleanup()
 
 
 if __name__ == '__main__':
