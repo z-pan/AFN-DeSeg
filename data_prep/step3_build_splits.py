@@ -6,7 +6,7 @@ expected by ``training/train_stage2_colab.py``.
 Expected inputs
 ---------------
 The noisy images (from Step 2) are always in their own directory.
-Clean images and masks can be provided in two ways:
+Clean images and masks can be provided in three ways:
 
 **Option A — separate directories** (``--clean_dir`` + ``--mask_dir``)::
 
@@ -20,7 +20,7 @@ Clean images and masks can be provided in two ways:
         img_001.tif
         …
 
-**Option B — co-located** (``--clean_mask_dir`` + ``--mask_suffix``)  ← actual data::
+**Option B — single co-located directory** (``--clean_mask_dir`` + ``--mask_suffix``)::
 
     clean_mask_dir/
         20240829 ... _0000.tif           # clean image
@@ -31,6 +31,23 @@ Clean images and masks can be provided in two ways:
 
     Use ``--mask_suffix _cp_masks`` (the default).  The script strips the suffix
     from the mask filename to recover the matching clean image stem.
+
+**Option C — multiple co-located directories** (``--clean_mask_dirs`` + ``--mask_suffix``)  ← actual data::
+
+    Use when labeled data spans several WSI folders that all follow the same
+    naming convention (e.g. 260227_WSI_00 through 260227_WSI_03).
+    All directories are merged into a single clean_map / mask_map before
+    the train/val split, so the split fraction applies to the **total** pool.
+    **Stem names must be unique across all directories.**
+
+    python data_prep/step3_build_splits.py \\
+        --noisy_dir       outputs/noisy_images/n_frames_1 \\
+        --clean_mask_dirs /path/to/260227_WSI_00 \\
+                          /path/to/260227_WSI_01 \\
+                          /path/to/260227_WSI_02 \\
+                          /path/to/260227_WSI_03 \\
+        --mask_suffix     _cp_masks \\
+        --output_dir      outputs/stage2_data
 
 Output layout
 -------------
@@ -62,7 +79,16 @@ Usage
 -----
 ::
 
-    # Option B — co-located images and masks (actual data):
+    # Option C — multiple co-located directories (four WSI folders):
+    python data_prep/step3_build_splits.py \\
+        --noisy_dir       outputs/noisy_images/n_frames_1 \\
+        --clean_mask_dirs /path/to/260227_WSI_00 \\
+                          /path/to/260227_WSI_01 \\
+                          /path/to/260227_WSI_02 \\
+                          /path/to/260227_WSI_03 \\
+        --output_dir      outputs/stage2_data
+
+    # Option B — single co-located directory:
     python data_prep/step3_build_splits.py \\
         --noisy_dir      outputs/noisy_images/n_frames_1 \\
         --clean_mask_dir /path/to/260227_WSI_00 \\
@@ -76,13 +102,15 @@ Usage
         --mask_dir   /path/to/masks \\
         --output_dir outputs/stage2_data
 
-    # Add n_frames_4 augmentation to the same split (either option):
+    # Add n_frames_4 augmentation to the same split (any option):
     python data_prep/step3_build_splits.py \\
-        --noisy_dir      outputs/noisy_images/n_frames_4 \\
-        --clean_mask_dir /path/to/260227_WSI_00 \\
-        --mask_suffix    _cp_masks \\
-        --output_dir     outputs/stage2_data \\
-        --noisy_suffix   _n4
+        --noisy_dir       outputs/noisy_images/n_frames_4 \\
+        --clean_mask_dirs /path/to/260227_WSI_00 \\
+                          /path/to/260227_WSI_01 \\
+                          /path/to/260227_WSI_02 \\
+                          /path/to/260227_WSI_03 \\
+        --output_dir      outputs/stage2_data \\
+        --noisy_suffix    _n4
 
 After running, MANUALLY check
 ------------------------------
@@ -133,14 +161,24 @@ def _build_parser() -> argparse.ArgumentParser:
         help='Directory with noisy images for one n_frames level.',
     )
 
-    # ---- clean + mask source: two mutually exclusive modes ----
+    # ---- clean + mask source: three mutually exclusive modes ----
     src = p.add_mutually_exclusive_group(required=True)
     src.add_argument(
         '--clean_mask_dir',
         metavar='DIR',
-        help='Directory containing clean images AND masks interleaved '
+        help='Single directory containing clean images AND masks interleaved '
              '(use together with --mask_suffix).  '
              'Example: /path/to/260227_WSI_00',
+    )
+    src.add_argument(
+        '--clean_mask_dirs',
+        nargs='+',
+        metavar='DIR',
+        help='Two or more co-located directories to merge (e.g. '
+             '260227_WSI_00 through 260227_WSI_03).  All directories are '
+             'combined into a single clean/mask pool before the train/val '
+             'split, so --val_fraction applies to the total image count.  '
+             'Stem names must be unique across all directories.',
     )
     src.add_argument(
         '--clean_dir',
@@ -220,6 +258,41 @@ def _transfer(src: Path, dst: Path, do_copy: bool, dry_run: bool) -> None:
         dst.symlink_to(src.resolve())
 
 
+def _load_multi_clean_mask_dirs(directories: list, mask_suffix: str):
+    """
+    Aggregate clean images and masks from several co-located directories.
+
+    Calls ``_split_clean_mask_dir`` for each directory and merges the results.
+    Exits with an error message if the same stem appears in more than one
+    directory (a collision would make it impossible to know which file to use).
+
+    Returns:
+        clean_map : {clean_stem: Path}
+        mask_map  : {clean_stem: Path}
+    """
+    merged_clean: dict = {}
+    merged_mask:  dict = {}
+
+    for d in directories:
+        c_map, m_map = _split_clean_mask_dir(d, mask_suffix)
+
+        # Collision check — clean images
+        collisions = set(merged_clean) & set(c_map)
+        if collisions:
+            shown = sorted(collisions)[:5]
+            print(f"[ERROR] Stem collision in clean images across directories!")
+            print(f"        Conflicting stems: {shown}"
+                  + ("  …" if len(collisions) > 5 else ""))
+            print(f"        Two or more folders contain files with the same name.")
+            print(f"        Rename the conflicting files before re-running.")
+            sys.exit(1)
+
+        merged_clean.update(c_map)
+        merged_mask.update(m_map)
+
+    return merged_clean, merged_mask
+
+
 def _split_clean_mask_dir(directory: Path, mask_suffix: str):
     """
     Separate clean images from mask files in a co-located directory.
@@ -265,8 +338,37 @@ def main(argv=None) -> int:
         return 1
 
     # ---- Resolve clean_map and mask_map depending on mode ----
-    if args.clean_mask_dir:
-        # Option B: co-located images and masks
+    if args.clean_mask_dirs:
+        # Option C: multiple co-located directories
+        dirs = [Path(d) for d in args.clean_mask_dirs]
+        missing = [d for d in dirs if not d.exists()]
+        if missing:
+            for d in missing:
+                print(f"[ERROR] --clean_mask_dirs: directory does not exist: {d}")
+            return 1
+        print(f"\n{BANNER}")
+        print(f"MERGING {len(dirs)} co-located directories (mask suffix '{args.mask_suffix}')")
+        for d in dirs:
+            print(f"  {d}")
+        clean_map, mask_map = _load_multi_clean_mask_dirs(dirs, args.mask_suffix)
+        print(f"  Clean images found : {len(clean_map)}")
+        print(f"  Mask files found   : {len(mask_map)}")
+        if not clean_map:
+            print(f"[ERROR] No clean image files found across all directories.")
+            return 1
+        if not mask_map:
+            print(f"[ERROR] No mask files found. Check --mask_suffix.")
+            return 1
+        unmatched_masks = set(mask_map) - set(clean_map)
+        if unmatched_masks:
+            print(f"  [WARN] {len(unmatched_masks)} mask(s) have no matching clean image:")
+            print(f"         {sorted(unmatched_masks)[:3]}"
+                  + ("  …" if len(unmatched_masks) > 3 else ""))
+        print(BANNER)
+        clean_src = f"{len(dirs)} directories"
+        mask_src  = clean_src
+    elif args.clean_mask_dir:
+        # Option B: single co-located directory
         clean_mask_dir = Path(args.clean_mask_dir)
         if not clean_mask_dir.exists():
             print(f"[ERROR] --clean_mask_dir does not exist: {clean_mask_dir}")
@@ -293,6 +395,8 @@ def main(argv=None) -> int:
             print(f"         {sorted(unmatched_masks)[:3]}"
                   + ("  …" if len(unmatched_masks) > 3 else ""))
         print(BANNER)
+        clean_src = str(clean_mask_dir)
+        mask_src  = clean_src
     else:
         # Option A: separate directories
         if args.mask_dir is None:
@@ -306,6 +410,8 @@ def main(argv=None) -> int:
                 return 1
         clean_map = _get_stems(clean_dir)
         mask_map  = _get_stems(mask_dir)
+        clean_src = str(clean_dir)
+        mask_src  = str(mask_dir)
 
     # ------------------------------------------------------------------
     # Collect stems from each directory
@@ -313,9 +419,6 @@ def main(argv=None) -> int:
     noisy_map = _get_stems(noisy_dir)
 
     all_stems = set(noisy_map) | set(clean_map) | set(mask_map)
-
-    clean_src = args.clean_mask_dir if args.clean_mask_dir else args.clean_dir
-    mask_src  = args.clean_mask_dir if args.clean_mask_dir else args.mask_dir
 
     print(f"\n{BANNER}")
     print("STEM INVENTORY")
