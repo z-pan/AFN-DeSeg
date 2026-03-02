@@ -72,13 +72,34 @@ Outputs
 ``output_dir/noisy/``
     8-bit grayscale TIFF patches from avg_1 (aligned with avg_16 windows).
 
-This layout is directly consumable by ``step3_build_splits.py`` via Option A::
+Downstream pipeline
+--------------------
+Step 1b outputs feed into **Step 2** before Step 3.  ``clean/`` patches serve
+as the clean source for synthetic noisy generation; ``noisy/`` (real avg_1
+patches) can be merged with the Step 2 output as an additional noisy source::
+
+    # Step 2 — generate synthetic noisy from all clean patches
+    python data_prep/step2_generate_noisy.py \\
+        --clean_dir   outputs/patches/clean \\
+        --params_file outputs/noise_estimation/noise_params.json \\
+        --output_dir  outputs/patches_noisy \\
+        --n_frames 1
+
+    # Step 3 — assemble train/val splits
+    #   noisy source A: synthetic noisy (from Step 2, covers all clean patches)
+    #   noisy source B: real avg_1 patches (noisy/, covers avg_16 subset only)
+    #   Run Step 3 twice with the same --output_dir to combine both noisy sources:
+    python data_prep/step3_build_splits.py \\
+        --noisy_dir  outputs/patches_noisy/n_frames_1 \\
+        --clean_dir  outputs/patches/clean \\
+        --mask_dir   outputs/patches/masks \\
+        --output_dir outputs/stage2_data --seed 42
 
     python data_prep/step3_build_splits.py \\
         --noisy_dir  outputs/patches/noisy \\
         --clean_dir  outputs/patches/clean \\
         --mask_dir   outputs/patches/masks \\
-        --output_dir outputs/stage2_data
+        --output_dir outputs/stage2_data --seed 42
 
 After running, MANUALLY check
 ------------------------------
@@ -86,7 +107,7 @@ After running, MANUALLY check
 
        ls outputs/patches/clean | wc -l   # total clean patches (WSI + avg_16)
        ls outputs/patches/masks | wc -l   # must equal clean count
-       ls outputs/patches/noisy | wc -l   # must equal avg_16 contribution only
+       ls outputs/patches/noisy | wc -l   # avg_16 contribution only (no WSI)
 
 2. Open 3–5 patch triplets in Fiji or Python and confirm:
 
@@ -94,13 +115,8 @@ After running, MANUALLY check
    - Masks are 512×512 uint16 PNG (Cellpose instance labels intact).
    - avg_1 (noisy/) and avg_16 (clean/) patches are spatially aligned.
 
-3. Run Step 3 to verify triplet matching::
-
-       python data_prep/step3_build_splits.py \\
-           --noisy_dir  outputs/patches/noisy \\
-           --clean_dir  outputs/patches/clean \\
-           --mask_dir   outputs/patches/masks \\
-           --output_dir outputs/stage2_data
+3. Proceed to Step 2 to generate synthetic noisy images from clean/ patches
+   before building train/val splits with Step 3.
 """
 
 import argparse
@@ -643,12 +659,27 @@ def main() -> int:
         print("     - Masks are 512×512 uint16 PNG (Cellpose instance labels).")
         print("     - avg_1 (noisy/) and avg_16 (clean/) patches are spatially aligned.")
         print()
-        print("3. Feed patches into Step 3 to build train/val splits:")
+        print("3. Run Step 2 to generate synthetic noisy images from clean/ patches:")
+        print(f"       python data_prep/step2_generate_noisy.py \\")
+        print(f"           --clean_dir   {out_root}/clean \\")
+        print(f"           --params_file outputs/noise_estimation/noise_params.json \\")
+        print(f"           --output_dir  outputs/patches_noisy \\")
+        print(f"           --n_frames 1")
+        print()
+        print("4. Run Step 3 (twice, once per noisy source) to build train/val splits:")
+        print(f"       # synthetic noisy (covers WSI + avg_16 clean patches)")
+        print(f"       python data_prep/step3_build_splits.py \\")
+        print(f"           --noisy_dir  outputs/patches_noisy/n_frames_1 \\")
+        print(f"           --clean_dir  {out_root}/clean \\")
+        print(f"           --mask_dir   {out_root}/masks \\")
+        print(f"           --output_dir outputs/stage2_data --seed 42")
+        print()
+        print(f"       # real avg_1 noisy (covers avg_16 subset only)")
         print(f"       python data_prep/step3_build_splits.py \\")
         print(f"           --noisy_dir  {out_root}/noisy \\")
         print(f"           --clean_dir  {out_root}/clean \\")
         print(f"           --mask_dir   {out_root}/masks \\")
-        print(f"           --output_dir outputs/stage2_data")
+        print(f"           --output_dir outputs/stage2_data --seed 42")
 
     return 0
 
