@@ -35,7 +35,9 @@ per_level  ← use this for the actual data
             avg_16/  ...
 
     The script automatically reorganises this into the per_fov layout (using
-    symlinks in a temporary directory) before running estimation.
+    a temporary directory with symlinks, or file copies on Windows) before
+    running estimation.  Cellpose output files co-located in avg_16/
+    (e.g. ``_seg.npy``, ``_cp_masks.png``) are automatically ignored.
 
 Usage
 -----
@@ -71,6 +73,7 @@ After running, MANUALLY check
 
 import argparse
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -89,6 +92,21 @@ _LEVEL_NAMES: dict = {
     8:  {'avg_8',  'avg8',  'avg_08',  'avg08'},
     16: {'avg_16', 'avg16', 'avg_016', 'avg016'},
 }
+
+# Suffixes that Cellpose appends to the image stem when saving outputs.
+# Files whose stems end with any of these are not calibration images and
+# must be excluded from FOV enumeration (especially in avg_16/ which is
+# also the labeled-data directory and may contain _seg.npy / _cp_masks.png).
+_CELLPOSE_STEM_SUFFIXES = ('_seg', '_cp_masks', '_cp_output', '_flows')
+
+
+def _is_calibration_image(f: Path) -> bool:
+    """Return True if *f* is a calibration image (not a Cellpose output file)."""
+    return (
+        f.is_file()
+        and f.suffix.lower() in {'.tif', '.tiff', '.npy'}
+        and not any(f.stem.endswith(sfx) for sfx in _CELLPOSE_STEM_SUFFIXES)
+    )
 
 # ---------------------------------------------------------------------------
 # Quality thresholds
@@ -197,11 +215,12 @@ def _validate_per_level(root: Path) -> bool:
         print(f"        Found subdirectories: {[d.name for d in root.iterdir() if d.is_dir()]}")
         return False
 
-    # Count FOVs per level and check they match
+    # Count FOVs per level and check they match.
+    # _is_calibration_image() excludes Cellpose outputs (_seg.npy, _cp_masks.png …)
+    # that may be co-located in avg_16/ alongside the actual calibration TIFFs.
     fov_counts = {}
     for n, d in found_n.items():
-        exts = {'.tif', '.tiff', '.npy'}
-        stems = {f.stem for f in d.iterdir() if f.suffix.lower() in exts}
+        stems = {f.stem for f in d.iterdir() if _is_calibration_image(f)}
         fov_counts[n] = stems
 
     complete_fovs = set.intersection(*fov_counts.values())
@@ -235,7 +254,9 @@ def _reorganize_per_level_to_per_fov(calibration_dir: str, tmp_dir: Path) -> str
     """
     Build a temporary per_fov directory from a per_level calibration layout.
 
-    Creates symlinks::
+    Tries to create symlinks for speed; falls back to shutil.copy2() on
+    systems where symlink creation is not permitted (e.g. Windows without
+    Developer Mode or Administrator rights)::
 
         tmp_dir/
             fov_001/
@@ -246,10 +267,12 @@ def _reorganize_per_level_to_per_fov(calibration_dir: str, tmp_dir: Path) -> str
             fov_002/
                 ...
 
+    Cellpose output files (_seg.npy, _cp_masks.png …) that may be co-located
+    in avg_16/ are automatically excluded via _is_calibration_image().
+
     Returns the path to tmp_dir (the per_fov root).
     """
     root = Path(calibration_dir)
-    exts = {'.tif', '.tiff', '.npy'}
 
     # Locate the four level directories
     level_dirs: dict = {}
@@ -259,9 +282,9 @@ def _reorganize_per_level_to_per_fov(calibration_dir: str, tmp_dir: Path) -> str
                 level_dirs[n] = d
                 break
 
-    # Collect FOV stems per level
+    # Collect FOV stems per level, excluding Cellpose output files
     fov_stems_per_level = {
-        n: {f.stem: f for f in d.iterdir() if f.suffix.lower() in exts}
+        n: {f.stem: f for f in d.iterdir() if _is_calibration_image(f)}
         for n, d in level_dirs.items()
     }
 
@@ -269,6 +292,9 @@ def _reorganize_per_level_to_per_fov(calibration_dir: str, tmp_dir: Path) -> str
     complete_fovs = set.intersection(
         *[set(s.keys()) for s in fov_stems_per_level.values()]
     )
+
+    # Try symlinks first; fall back to copies if the OS refuses (WinError 1314)
+    use_symlinks = True
 
     tmp_dir.mkdir(parents=True, exist_ok=True)
     for stem in sorted(complete_fovs):
@@ -278,10 +304,20 @@ def _reorganize_per_level_to_per_fov(calibration_dir: str, tmp_dir: Path) -> str
             src = stem_map[stem]
             # Destination name must match what noise_model.py expects: avg1.tif etc.
             dst = fov_dir / f"avg{n}.tif"
-            if not dst.exists():
-                dst.symlink_to(src.resolve())
+            if dst.exists():
+                continue
+            if use_symlinks:
+                try:
+                    dst.symlink_to(src.resolve())
+                except OSError:
+                    # Symlinks not permitted (Windows without Developer Mode)
+                    use_symlinks = False
+                    shutil.copy2(src, dst)
+            else:
+                shutil.copy2(src, dst)
 
-    print(f"  Reorganised {len(complete_fovs)} FOVs into temporary per_fov layout:")
+    method = "symlinks" if use_symlinks else "copies"
+    print(f"  Reorganised {len(complete_fovs)} FOVs into temporary per_fov layout ({method}):")
     print(f"  {tmp_dir}")
     return str(tmp_dir)
 
@@ -455,7 +491,7 @@ def main(argv=None) -> int:
     data_dir = args.calibration_dir
     if args.calibration_layout == 'per_level':
         print(f"\n{BANNER}")
-        print("REORGANISING per_level → per_fov (symlinks in temp directory) …")
+        print("REORGANISING per_level → per_fov (temp directory) …")
         tmp_dir_obj = tempfile.TemporaryDirectory(prefix='afn_calib_')
         tmp_path = Path(tmp_dir_obj.name)
         data_dir = _reorganize_per_level_to_per_fov(args.calibration_dir, tmp_path)
