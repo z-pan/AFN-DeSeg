@@ -185,6 +185,7 @@ class CellposeFeatureExtractor(nn.Module):
         # Lazy initialization flag
         self._initialized = False
         self._cpnet = None
+        self._incompatible = False   # True when Cellpose ≥4.0 SAM backbone detected
 
         # Feature hooks storage
         self._features: Dict[str, torch.Tensor] = {}
@@ -211,6 +212,22 @@ class CellposeFeatureExtractor(nn.Module):
         # Get the CPnet (the neural network component)
         self._cpnet = cp_model.net
 
+        # Cellpose ≥4.0 replaced CPnet with a SAM-based ViT backbone.
+        # That architecture has no downsample/upsample blocks, so our
+        # feature hooks cannot be registered.  Mark as incompatible and
+        # skip hook registration; forward() will return an empty dict,
+        # making the perceptual loss contribution zero for this run.
+        if not (hasattr(self._cpnet, 'downsample') and hasattr(self._cpnet, 'upsample')):
+            print(
+                "[PerceptualLoss] Warning: Cellpose ≥4.0 SAM backbone detected. "
+                "Feature hooks are not supported in this version. "
+                "Cellpose perceptual loss will be zero for this training run. "
+                "Pass --no_cellpose to use the placeholder perceptual loss instead."
+            )
+            self._incompatible = True
+            self._initialized = True
+            return
+
         # Freeze all weights
         for param in self._cpnet.parameters():
             param.requires_grad = False
@@ -235,22 +252,27 @@ class CellposeFeatureExtractor(nn.Module):
                 self._features[name] = output
             return hook
 
-        # Hook into the bottleneck (last downsample output)
-        # In CPnet, this is typically after the encoder before upsampling
+        # Hook into the bottleneck (last downsample output).
+        # Cellpose 2.x: downsample is a ModuleList — hook the last element.
+        # Cellpose 3.x: downsample is a single nn.Module — hook it directly.
         if hasattr(self._cpnet, 'downsample'):
-            # Get the last downsample block for bottleneck features
-            num_down = len(self._cpnet.downsample)
-            if num_down > 0:
-                self._cpnet.downsample[-1].register_forward_hook(
-                    get_hook('bottleneck')
-                )
+            ds = self._cpnet.downsample
+            try:
+                target = ds[-1] if len(ds) > 0 else None
+            except TypeError:
+                target = ds
+            if target is not None:
+                target.register_forward_hook(get_hook('bottleneck'))
 
-        # Hook into the first upsample layer
+        # Hook into the first upsample layer (same dual-version logic).
         if hasattr(self._cpnet, 'upsample'):
-            if len(self._cpnet.upsample) > 0:
-                self._cpnet.upsample[0].register_forward_hook(
-                    get_hook('upsample1')
-                )
+            us = self._cpnet.upsample
+            try:
+                target = us[0] if len(us) > 0 else None
+            except TypeError:
+                target = us
+            if target is not None:
+                target.register_forward_hook(get_hook('upsample1'))
 
     def _z_score_normalize(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -280,6 +302,11 @@ class CellposeFeatureExtractor(nn.Module):
         """
         device = x.device
         self._ensure_initialized(device)
+
+        # SAM-based Cellpose 4.x: hooks unavailable, return empty dict so
+        # PerceptualLoss.forward produces zero loss without crashing.
+        if self._incompatible:
+            return {}
 
         # Clear previous features
         self._features = {}
