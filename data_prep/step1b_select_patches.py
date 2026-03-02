@@ -184,10 +184,22 @@ def _load_image(path: Path) -> np.ndarray:
 
 def _load_mask(path: Path) -> np.ndarray:
     """Load a Cellpose mask (PNG or TIFF), preserving native uint16 labels."""
-    if HAS_TIFFFILE:
-        return tifffile.imread(str(path))
-    if HAS_SKIMAGE:
-        return skimage_io.imread(str(path))
+    suffix = path.suffix.lower()
+    if suffix in (".tif", ".tiff"):
+        if HAS_TIFFFILE:
+            return tifffile.imread(str(path))
+        if HAS_SKIMAGE:
+            return skimage_io.imread(str(path))
+    else:  # .png or any other format
+        if HAS_SKIMAGE:
+            return skimage_io.imread(str(path))
+        if HAS_TIFFFILE:
+            # tifffile cannot read PNG; fall back to PIL if available
+            try:
+                from PIL import Image
+                return np.array(Image.open(str(path)))
+            except ImportError:
+                pass
     raise ImportError(
         "tifffile or scikit-image is required — "
         "install with: pip install tifffile scikit-image"
