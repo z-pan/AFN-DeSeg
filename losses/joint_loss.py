@@ -126,7 +126,6 @@ class SegmentationLoss(nn.Module):
         self.bce_weight = bce_weight
 
         self.dice_loss = DiceLoss()
-        self.bce_loss = nn.BCELoss()
 
     def forward(
         self,
@@ -144,7 +143,9 @@ class SegmentationLoss(nn.Module):
             Tuple of (total_loss, dice_loss, bce_loss).
         """
         dice = self.dice_loss(pred, target)
-        bce = self.bce_loss(pred, target)
+        # Cast to float32: BCELoss is unsafe under AMP (autocast may lower to fp16).
+        # The model already applies sigmoid, so we use binary_cross_entropy directly.
+        bce = F.binary_cross_entropy(pred.float(), target.float())
 
         total = self.dice_weight * dice + self.bce_weight * bce
 
