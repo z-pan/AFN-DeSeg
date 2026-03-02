@@ -196,7 +196,6 @@ class CellposeFeatureExtractor(nn.Module):
 
         try:
             from cellpose import models
-            from cellpose.resnet_torch import CPnet
         except ImportError:
             raise ImportError(
                 "Cellpose is required for perceptual loss. "
