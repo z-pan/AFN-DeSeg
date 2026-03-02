@@ -185,6 +185,7 @@ class CellposeFeatureExtractor(nn.Module):
         # Lazy initialization flag
         self._initialized = False
         self._cpnet = None
+        self._incompatible = False   # True when Cellpose ≥4.0 SAM backbone detected
 
         # Feature hooks storage
         self._features: Dict[str, torch.Tensor] = {}
@@ -210,6 +211,22 @@ class CellposeFeatureExtractor(nn.Module):
 
         # Get the CPnet (the neural network component)
         self._cpnet = cp_model.net
+
+        # Cellpose ≥4.0 replaced CPnet with a SAM-based ViT backbone.
+        # That architecture has no downsample/upsample blocks, so our
+        # feature hooks cannot be registered.  Mark as incompatible and
+        # skip hook registration; forward() will return an empty dict,
+        # making the perceptual loss contribution zero for this run.
+        if not (hasattr(self._cpnet, 'downsample') and hasattr(self._cpnet, 'upsample')):
+            print(
+                "[PerceptualLoss] Warning: Cellpose ≥4.0 SAM backbone detected. "
+                "Feature hooks are not supported in this version. "
+                "Cellpose perceptual loss will be zero for this training run. "
+                "Pass --no_cellpose to use the placeholder perceptual loss instead."
+            )
+            self._incompatible = True
+            self._initialized = True
+            return
 
         # Freeze all weights
         for param in self._cpnet.parameters():
@@ -280,6 +297,11 @@ class CellposeFeatureExtractor(nn.Module):
         """
         device = x.device
         self._ensure_initialized(device)
+
+        # SAM-based Cellpose 4.x: hooks unavailable, return empty dict so
+        # PerceptualLoss.forward produces zero loss without crashing.
+        if self._incompatible:
+            return {}
 
         # Clear previous features
         self._features = {}
