@@ -247,9 +247,22 @@ class CellposeFeatureExtractor(nn.Module):
         # - upsample blocks (decoder)
         # We need bottleneck (end of encoder) and first upsample layer
 
-        def get_hook(name):
+        def get_hook(name, pick_last: bool = True):
+            """
+            pick_last=True  → take output[-1] when output is a list/tuple
+                               (Cellpose 3.x downsample returns all encoder levels;
+                                deepest = last = bottleneck).
+            pick_last=False → take output[0]
+                               (upsample returns progressively upsampled maps;
+                                first = finest-grained decoder level).
+            If output is already a Tensor, store it as-is.
+            """
             def hook(module, input, output):
-                self._features[name] = output
+                if isinstance(output, (list, tuple)):
+                    feat = output[-1] if pick_last else output[0]
+                else:
+                    feat = output
+                self._features[name] = feat
             return hook
 
         # Hook into the bottleneck (last downsample output).
@@ -262,7 +275,7 @@ class CellposeFeatureExtractor(nn.Module):
             except TypeError:
                 target = ds
             if target is not None:
-                target.register_forward_hook(get_hook('bottleneck'))
+                target.register_forward_hook(get_hook('bottleneck', pick_last=True))
 
         # Hook into the first upsample layer (same dual-version logic).
         if hasattr(self._cpnet, 'upsample'):
@@ -272,7 +285,7 @@ class CellposeFeatureExtractor(nn.Module):
             except TypeError:
                 target = us
             if target is not None:
-                target.register_forward_hook(get_hook('upsample1'))
+                target.register_forward_hook(get_hook('upsample1', pick_last=False))
 
     def _z_score_normalize(self, x: torch.Tensor) -> torch.Tensor:
         """
