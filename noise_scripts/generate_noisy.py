@@ -119,6 +119,20 @@ def _build_parser() -> argparse.ArgumentParser:
         help='Base random seed for reproducibility. Per-image seeds are '
              'derived as seed + image_index.',
     )
+    p.add_argument(
+        '--random_level', action='store_true', default=False,
+        help='Assign each image exactly ONE randomly-chosen noise level from '
+             '--n_frames instead of generating all levels for every image. '
+             'All outputs go to a single output_dir/n_frames_random/ directory. '
+             'Use --level_weights to control the per-level probabilities.',
+    )
+    p.add_argument(
+        '--level_weights', nargs='+', type=float, default=None,
+        metavar='W',
+        help='Unnormalised sampling weights for --random_level, one per '
+             '--n_frames value (in the same order). Default: uniform. '
+             'Example: --n_frames 0.5 1 --level_weights 1 1  →  50/50 split.',
+    )
 
     # ---- Output options ----
     p.add_argument(
@@ -239,15 +253,46 @@ def main(argv=None) -> int:
     logger.info("Found %d clean image(s) to process.", len(image_paths))
 
     # ------------------------------------------------------------------
-    # Create output subdirectory per n_frames level
+    # Prepare level directories and (optionally) random assignment
     # ------------------------------------------------------------------
     n_frames_sorted = sorted(set(float(v) for v in args.n_frames))
-    level_dirs: Dict[float, Path] = {}
-    for nf in n_frames_sorted:
-        label = f'n_frames_{nf:.0f}' if nf == int(nf) else f'n_frames_{nf:.2f}'
-        d = output_dir / label
-        d.mkdir(parents=True, exist_ok=True)
-        level_dirs[nf] = d
+
+    if args.random_level:
+        # Validate weights
+        raw_weights = args.level_weights if args.level_weights else [1.0] * len(n_frames_sorted)
+        if len(raw_weights) != len(n_frames_sorted):
+            logger.error(
+                "--level_weights has %d value(s) but --n_frames has %d value(s).",
+                len(raw_weights), len(n_frames_sorted),
+            )
+            return 1
+        total_w = sum(raw_weights)
+        probs = [w / total_w for w in raw_weights]
+
+        # Deterministic per-image level assignment (uses base seed, not per-image seed)
+        assign_rng = np.random.default_rng(args.seed)
+        assigned_levels = assign_rng.choice(n_frames_sorted, size=len(image_paths), p=probs)
+
+        from collections import Counter
+        dist = Counter(float(v) for v in assigned_levels)
+        logger.info("Random level assignment distribution:")
+        for nf in n_frames_sorted:
+            label = f'n_frames_{nf:.0f}' if nf == int(nf) else f'n_frames_{nf:.2f}'
+            logger.info("  %s : %d images (%.1f %%)",
+                        label, dist[nf], 100 * dist[nf] / len(image_paths))
+
+        random_dir = output_dir / 'n_frames_random'
+        random_dir.mkdir(parents=True, exist_ok=True)
+        level_dirs = None   # not used in random mode
+    else:
+        assigned_levels = None
+        random_dir = None
+        level_dirs: Dict[float, Path] = {}
+        for nf in n_frames_sorted:
+            label = f'n_frames_{nf:.0f}' if nf == int(nf) else f'n_frames_{nf:.2f}'
+            d = output_dir / label
+            d.mkdir(parents=True, exist_ok=True)
+            level_dirs[nf] = d
 
     # ------------------------------------------------------------------
     # Process each image
@@ -272,41 +317,50 @@ def main(argv=None) -> int:
             n_err += 1
             continue
 
-        orig_dtype = clean.dtype
-
         # Per-image seed derived from base seed
         per_image_seed = None if args.seed is None else args.seed + img_idx
 
-        # Generate noisy images at all requested levels
-        noisy_dict: Dict[float, np.ndarray] = gen.generate_noise_levels(
-            clean_image=clean,
-            n_frames_list=n_frames_sorted,
-            seed=per_image_seed,
-        )
-
-        # Save per-level images
-        for nf, noisy in noisy_dict.items():
-            out_path = level_dirs[nf] / rel_stem
+        if args.random_level:
+            # Single assigned level for this image
+            nf = float(assigned_levels[img_idx])
+            noisy = gen.add_noise(clean, n_frames=nf, seed=per_image_seed)
+            out_path = random_dir / rel_stem
             try:
                 _save_image(noisy, out_path, args.output_format)
-                logger.debug("  Saved n_frames=%.0f → '%s'", nf, out_path)
+                logger.debug("  Saved n_frames=%.2f → '%s'", nf, out_path)
             except Exception as exc:
-                logger.warning("  Failed to save n_frames=%.0f '%s': %s", nf, out_path, exc)
+                logger.warning("  Failed to save '%s': %s", out_path, exc)
                 n_err += 1
+        else:
+            # All requested levels
+            noisy_dict: Dict[float, np.ndarray] = gen.generate_noise_levels(
+                clean_image=clean,
+                n_frames_list=n_frames_sorted,
+                seed=per_image_seed,
+            )
 
-        # Optional side-by-side comparison plot
-        if args.save_comparison:
-            try:
-                import matplotlib.pyplot as plt
-                fig = plot_noise_level_comparison(
-                    clean_image=clean.astype(np.float64),
-                    noisy_images=noisy_dict,
-                    output_path=str(output_dir / 'comparisons' / f'{rel_stem}.png'),
-                    crop=args.comparison_crop,
-                )
-                plt.close(fig)
-            except Exception as exc:
-                logger.warning("  Comparison plot failed for '%s': %s", img_path.name, exc)
+            for nf, noisy in noisy_dict.items():
+                out_path = level_dirs[nf] / rel_stem
+                try:
+                    _save_image(noisy, out_path, args.output_format)
+                    logger.debug("  Saved n_frames=%.0f → '%s'", nf, out_path)
+                except Exception as exc:
+                    logger.warning("  Failed to save n_frames=%.0f '%s': %s", nf, out_path, exc)
+                    n_err += 1
+
+            # Optional side-by-side comparison plot (multi-level mode only)
+            if args.save_comparison:
+                try:
+                    import matplotlib.pyplot as plt
+                    fig = plot_noise_level_comparison(
+                        clean_image=clean.astype(np.float64),
+                        noisy_images=noisy_dict,
+                        output_path=str(output_dir / 'comparisons' / f'{rel_stem}.png'),
+                        crop=args.comparison_crop,
+                    )
+                    plt.close(fig)
+                except Exception as exc:
+                    logger.warning("  Comparison plot failed for '%s': %s", img_path.name, exc)
 
         n_ok += 1
 
@@ -318,7 +372,10 @@ def main(argv=None) -> int:
     logger.info("  Processed : %d image(s)", n_ok)
     logger.info("  Errors    : %d", n_err)
     logger.info("  Outputs   : %s", output_dir)
-    logger.info("  Levels    : %s", [f'n={nf:.0f}' for nf in n_frames_sorted])
+    if args.random_level:
+        logger.info("  Mode      : random_level  →  n_frames_random/")
+    else:
+        logger.info("  Levels    : %s", [f'n={nf:.0f}' for nf in n_frames_sorted])
     logger.info("=" * 60)
 
     return 0 if n_err == 0 else 1

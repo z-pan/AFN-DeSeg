@@ -55,6 +55,33 @@ the script will report the conflict and exit without processing any images.
 All directories write into the same ``output_dir``, so a single
 ``step3_build_splits.py`` run can find all noisy files.
 
+Usage — random noise-level assignment (one level per image)
+-----------------------------------------------------------
+Use ``--random_level`` so that each image receives exactly **one** randomly
+chosen noise level instead of one copy at every requested level.  This
+prevents the model from seeing the same image paired with multiple noise
+levels, which can create unwanted correlations in the training set.
+
+All outputs go to a single ``output_dir/n_frames_random/`` directory.
+``--level_weights`` controls the per-level probability (unnormalised).
+
+::
+
+    python data_prep/step2_generate_noisy.py \\
+        --clean_dirs  /path/to/260227_WSI_00 \\
+                      /path/to/260227_WSI_01 \\
+                      /path/to/260227_WSI_02 \\
+                      /path/to/260227_WSI_03 \\
+        --params_file outputs/noise_estimation/noise_params.json \\
+        --output_dir  outputs/noisy_images \\
+        --n_frames 0.5 1 \\
+        --level_weights 1 1 \\
+        --random_level \\
+        --seed 42
+
+Then pass ``outputs/noisy_images/n_frames_random`` as ``--noisy_dir`` to
+Step 3.
+
 Output layout
 -------------
 ::
@@ -164,6 +191,20 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar='PIXELS',
         help='Crop to this central square for comparison panels.',
     )
+    p.add_argument(
+        '--random_level', action='store_true', default=False,
+        help='Assign each clean image exactly ONE randomly-chosen noise level '
+             'from --n_frames.  All outputs go to output_dir/n_frames_random/ '
+             '(single flat directory).  Prevents the model seeing the same '
+             'image paired with multiple noise levels.',
+    )
+    p.add_argument(
+        '--level_weights', nargs='+', type=float, default=None,
+        metavar='W',
+        help='Unnormalised sampling weights for --random_level, one per '
+             '--n_frames value (same order).  Default: uniform.  '
+             'Example: --n_frames 0.5 1 --level_weights 1 1  →  50/50.',
+    )
     p.add_argument('--verbose', action='store_true', default=False,
                    help='Pass --verbose to the underlying generation script.')
     return p
@@ -270,8 +311,12 @@ def _run_generation(args, clean_dirs: list) -> int:
             '--seed', str(args.seed),
             '--output_format', 'tif',
         ]
-        if args.save_comparison:
+        if args.save_comparison and not args.random_level:
             cmd += ['--save_comparison', '--comparison_crop', str(args.comparison_crop)]
+        if args.random_level:
+            cmd.append('--random_level')
+            if args.level_weights:
+                cmd += ['--level_weights', *[str(w) for w in args.level_weights]]
         if args.verbose:
             cmd.append('--verbose')
 
@@ -286,7 +331,8 @@ def _run_generation(args, clean_dirs: list) -> int:
 # Post-generation checks
 # ---------------------------------------------------------------------------
 
-def _post_check(clean_dirs: list, output_dir: str, n_frames: list) -> bool:
+def _post_check(clean_dirs: list, output_dir: str, n_frames: list,
+                random_level: bool = False) -> bool:
     """Count generated files across all source directories and flag mismatches."""
     out_path = Path(output_dir)
 
@@ -305,42 +351,76 @@ def _post_check(clean_dirs: list, output_dir: str, n_frames: list) -> bool:
     print()
 
     all_ok = True
-    for nf in sorted(n_frames):
-        label = f'n_frames_{nf:.0f}' if nf == int(nf) else f'n_frames_{nf:.2f}'
-        level_dir = out_path / label
 
-        if not level_dir.exists():
-            print(f"  [MISSING] {label}/  — directory was not created!")
+    if random_level:
+        # Random mode: single output directory
+        random_dir = out_path / 'n_frames_random'
+        if not random_dir.exists():
+            print("  [MISSING] n_frames_random/  — directory was not created!")
             all_ok = False
-            continue
-
-        noisy_stems = {
-            f.stem for f in level_dir.iterdir()
-            if f.suffix.lower() in _SUPPORTED_EXT
-        }
-        n_noisy = len(noisy_stems)
-        missing  = clean_stems - noisy_stems
-        extra    = noisy_stems - clean_stems
-
-        if not missing and not extra:
-            print(f"  [OK]      {label}/  {n_noisy} images  (all matched)")
         else:
-            all_ok = False
-            print(f"  [WARN]    {label}/  {n_noisy}/{n_clean} images")
-            if missing:
-                shown = sorted(missing)[:5]
-                print(f"            Missing: {shown}"
-                      + ("  …" if len(missing) > 5 else ""))
-            if extra:
-                shown = sorted(extra)[:5]
-                print(f"            Extra  : {shown}"
-                      + ("  …" if len(extra) > 5 else ""))
+            noisy_stems = {
+                f.stem for f in random_dir.iterdir()
+                if f.suffix.lower() in _SUPPORTED_EXT
+            }
+            n_noisy = len(noisy_stems)
+            missing = clean_stems - noisy_stems
+            extra   = noisy_stems - clean_stems
+            if not missing and not extra:
+                print(f"  [OK]      n_frames_random/  {n_noisy} images  (all matched)")
+            else:
+                all_ok = False
+                print(f"  [WARN]    n_frames_random/  {n_noisy}/{n_clean} images")
+                if missing:
+                    shown = sorted(missing)[:5]
+                    print(f"            Missing: {shown}"
+                          + ("  …" if len(missing) > 5 else ""))
+                if extra:
+                    shown = sorted(extra)[:5]
+                    print(f"            Extra  : {shown}"
+                          + ("  …" if len(extra) > 5 else ""))
+    else:
+        for nf in sorted(n_frames):
+            label = f'n_frames_{nf:.0f}' if nf == int(nf) else f'n_frames_{nf:.2f}'
+            level_dir = out_path / label
+
+            if not level_dir.exists():
+                print(f"  [MISSING] {label}/  — directory was not created!")
+                all_ok = False
+                continue
+
+            noisy_stems = {
+                f.stem for f in level_dir.iterdir()
+                if f.suffix.lower() in _SUPPORTED_EXT
+            }
+            n_noisy = len(noisy_stems)
+            missing  = clean_stems - noisy_stems
+            extra    = noisy_stems - clean_stems
+
+            if not missing and not extra:
+                print(f"  [OK]      {label}/  {n_noisy} images  (all matched)")
+            else:
+                all_ok = False
+                print(f"  [WARN]    {label}/  {n_noisy}/{n_clean} images")
+                if missing:
+                    shown = sorted(missing)[:5]
+                    print(f"            Missing: {shown}"
+                          + ("  …" if len(missing) > 5 else ""))
+                if extra:
+                    shown = sorted(extra)[:5]
+                    print(f"            Extra  : {shown}"
+                          + ("  …" if len(extra) > 5 else ""))
 
     comp_dir = out_path / 'comparisons'
     print(BANNER)
     print("\n*** MANUAL CHECKS REQUIRED ***")
     print()
-    if comp_dir.exists():
+    if random_level:
+        print(f"1. Open a sample of images from: {out_path / 'n_frames_random'}/")
+        print("   - Noise should be visible but structures still recognisable.")
+        print("   - Verify that ~50% of images appear noisier (n_frames=0.5) than")
+        print("     the other half (n_frames=1) when inspected side-by-side.")
+    elif comp_dir.exists():
         print(f"1. Open comparison panels in:  {comp_dir}/")
         print("   - n_frames_1 column must look visibly noisy (granular/speckled).")
         print("   - Noise should be spatially uncorrelated (no bands or stripes).")
@@ -384,7 +464,8 @@ def main(argv=None) -> int:
         print("        Check the output above for error messages.")
         return rc
 
-    ok = _post_check(clean_dirs, args.output_dir, args.n_frames)
+    ok = _post_check(clean_dirs, args.output_dir, args.n_frames,
+                     random_level=args.random_level)
     return 0 if ok else 1
 
 
