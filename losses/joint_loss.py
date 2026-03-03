@@ -419,11 +419,19 @@ class PerceptualLoss(nn.Module):
 
     @staticmethod
     def _standardize_feat(feat: torch.Tensor) -> torch.Tensor:
-        """Per-sample zero-mean, unit-std normalisation over all spatial dims."""
-        flat = feat.view(feat.shape[0], -1)          # (B, C*H*W)
-        mean = flat.mean(dim=1).view(-1, 1, 1, 1)
-        std  = flat.std(dim=1).clamp(min=1e-5).view(-1, 1, 1, 1)
-        return (feat - mean) / std
+        """
+        L2-norm normalisation: map each sample's feature vector to unit norm.
+
+        MSE between two unit-norm vectors is strictly in [0, 4], regardless
+        of activation magnitudes or distribution shape.  This replaces the
+        previous z-score approach which could amplify features with small std
+        (e.g. std=1e-4) by 10 000× before computing MSE.
+        """
+        flat = feat.view(feat.shape[0], -1)            # (B, C*H*W)
+        norm = flat.norm(dim=1, keepdim=True) \
+                   .clamp(min=1e-5) \
+                   .view(feat.shape[0], *([1] * (feat.dim() - 1)))
+        return feat / norm
 
 
 class PerceptualLossPlaceholder(nn.Module):
