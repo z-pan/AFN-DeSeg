@@ -405,14 +405,25 @@ class PerceptualLoss(nn.Module):
 
         for layer_name, weight in self.feature_weights.items():
             if layer_name in pred_features and layer_name in target_features:
-                layer_loss = self.mse_loss(
-                    pred_features[layer_name],
-                    target_features[layer_name]
-                )
+                # Standardize each feature map to zero-mean, unit-std before
+                # MSE.  Cellpose activations are unbounded (can be O(100)),
+                # so raw MSE produces huge, unstable values; standardisation
+                # makes the perceptual loss scale-invariant and bounded.
+                p_feat = self._standardize_feat(pred_features[layer_name])
+                t_feat = self._standardize_feat(target_features[layer_name])
+                layer_loss = self.mse_loss(p_feat, t_feat)
                 layer_losses[layer_name] = layer_loss
                 total_loss = total_loss + weight * layer_loss
 
         return total_loss, layer_losses
+
+    @staticmethod
+    def _standardize_feat(feat: torch.Tensor) -> torch.Tensor:
+        """Per-sample zero-mean, unit-std normalisation over all spatial dims."""
+        flat = feat.view(feat.shape[0], -1)          # (B, C*H*W)
+        mean = flat.mean(dim=1).view(-1, 1, 1, 1)
+        std  = flat.std(dim=1).clamp(min=1e-5).view(-1, 1, 1, 1)
+        return (feat - mean) / std
 
 
 class PerceptualLossPlaceholder(nn.Module):
