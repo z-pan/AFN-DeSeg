@@ -54,7 +54,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import GradScaler, autocast
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader, Dataset
@@ -357,7 +357,7 @@ def train_one_epoch(
 
         noisy_rgb = AFNDeSeg.preprocess_tpaf(noisy, normalize=True)
 
-        with autocast():
+        with autocast('cuda'):
             denoised, seg_pred = model(noisy_rgb)
             loss, loss_dict = criterion(denoised, seg_pred, clean, mask)
 
@@ -400,7 +400,7 @@ def validate(
 
         noisy_rgb = AFNDeSeg.preprocess_tpaf(noisy, normalize=True)
 
-        with autocast():
+        with autocast('cuda'):
             denoised, seg_pred = model(noisy_rgb)
             loss, _ = criterion(denoised, seg_pred, clean, mask)
 
@@ -494,7 +494,7 @@ def train(args: argparse.Namespace) -> None:
         weight_decay=args.weight_decay,
     )
     scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=args.min_lr)
-    scaler    = GradScaler()   # AMP — A100 BF16/FP16 tensor cores
+    scaler    = GradScaler('cuda')   # AMP — A100 BF16/FP16 tensor cores
 
     # ------------------------------------------------------------------
     # Datasets  (train/ and val/ live inside args.data_dir)

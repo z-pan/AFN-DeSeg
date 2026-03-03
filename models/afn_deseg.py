@@ -815,7 +815,10 @@ class AFNDeSeg(nn.Module):
         fused = self.fusion(unet_bottleneck, vit_tokens, self.vit_grid_size)
 
         # Dual decoders
-        denoised = self.denoising_decoder(fused, skip_connections)
+        # sigmoid constrains denoised to [0, 1] to match the [0, 1] clean GT;
+        # without it, raw Conv2d outputs cause negative PSNR and destabilize
+        # the Cellpose perceptual loss.
+        denoised  = torch.sigmoid(self.denoising_decoder(fused, skip_connections))
         segmented = self.segmentation_decoder(fused, skip_connections)
 
         return denoised, segmented
