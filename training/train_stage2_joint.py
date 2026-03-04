@@ -110,7 +110,9 @@ class TPAFDataset(Dataset):
     ):
         """
         Args:
-            data_dir: Root directory containing noisy/, clean/, masks/ folders.
+            data_dir: Root directory containing train/ and val/ split folders,
+                      each with noisy/, clean/, masks/ subfolders.
+                      e.g. data_dir/train/noisy/, data_dir/val/noisy/
             split: Dataset split ('train', 'val', 'test').
             img_size: Image size (assumes square images).
             augment: Whether to apply data augmentation.
@@ -120,22 +122,33 @@ class TPAFDataset(Dataset):
         self.img_size = img_size
         self.augment = augment and (split == 'train')
 
-        # Find image files
-        self.noisy_dir = self.data_dir / 'noisy'
-        self.clean_dir = self.data_dir / 'clean'
-        self.mask_dir = self.data_dir / 'masks'
+        # Split-aware sub-directory (matches train_stage2_colab.py layout):
+        #   data_dir/train/noisy/  data_dir/train/clean/  ...
+        #   data_dir/val/noisy/    data_dir/val/clean/    ...
+        split_dir = self.data_dir / split
+        self.noisy_dir = split_dir / 'noisy'
+        self.clean_dir = split_dir / 'clean'
+        self.mask_dir  = split_dir / 'masks'
 
         # Get list of samples (by filename without extension)
         self.samples = self._get_samples()
 
     def _get_samples(self):
         """Get list of sample names from noisy directory."""
-        samples = []
+        if not self.noisy_dir.exists():
+            raise FileNotFoundError(
+                f"noisy/ directory not found: {self.noisy_dir}\n"
+                f"Expected layout: data_dir/{self.split}/noisy/ , "
+                f"data_dir/{self.split}/clean/ , data_dir/{self.split}/masks/"
+            )
 
-        if self.noisy_dir.exists():
-            for f in self.noisy_dir.iterdir():
-                if f.suffix in ['.npy', '.png', '.tif', '.tiff']:
-                    samples.append(f.stem)
+        samples = [
+            f.stem for f in self.noisy_dir.iterdir()
+            if f.suffix in ['.npy', '.png', '.tif', '.tiff']
+        ]
+
+        if not samples:
+            raise ValueError(f"No images found in {self.noisy_dir}")
 
         return sorted(samples)
 
