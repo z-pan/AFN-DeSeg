@@ -583,8 +583,11 @@ class DenoisingDecoder(nn.Module):
             self.decoder_blocks.append(DecoderBlock(current_ch, skip_ch, out_ch))
             current_ch = out_ch
 
-        # Final output layer (single channel intensity map)
-        self.output = nn.Conv2d(current_ch, 1, kernel_size=1)
+        # Final output layer (single channel intensity map, sigmoid for [0,1] range)
+        self.output = nn.Sequential(
+            nn.Conv2d(current_ch, 1, kernel_size=1),
+            nn.Sigmoid()
+        )
 
     def forward(
         self,

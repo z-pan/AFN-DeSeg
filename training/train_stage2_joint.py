@@ -129,15 +129,27 @@ class TPAFDataset(Dataset):
         self.samples = self._get_samples()
 
     def _get_samples(self):
-        """Get list of sample names from noisy directory."""
-        samples = []
+        """Get list of sample names from noisy directory, filtered by split.
+
+        Uses a deterministic 85/15 train/val split based on sorted filenames.
+        """
+        all_samples = []
 
         if self.noisy_dir.exists():
             for f in self.noisy_dir.iterdir():
                 if f.suffix in ['.npy', '.png', '.tif', '.tiff']:
-                    samples.append(f.stem)
+                    all_samples.append(f.stem)
 
-        return sorted(samples)
+        all_samples = sorted(all_samples)
+
+        if self.split == 'train':
+            split_idx = int(len(all_samples) * 0.85)
+            return all_samples[:split_idx]
+        elif self.split == 'val':
+            split_idx = int(len(all_samples) * 0.85)
+            return all_samples[split_idx:]
+        else:
+            return all_samples
 
     def _load_image(self, path: Path) -> np.ndarray:
         """Load image from various formats."""
@@ -677,8 +689,10 @@ def parse_args():
     # Model arguments
     parser.add_argument('--pretrained_vit', type=str, default=None,
                         help='Path to pretrained ViT weights')
-    parser.add_argument('--freeze_vit', action='store_true',
-                        help='Freeze ViT backbone (only train LoRA)')
+    parser.add_argument('--freeze_vit', action='store_true', default=True,
+                        help='Freeze ViT backbone (only train LoRA) [default: True]')
+    parser.add_argument('--no_freeze_vit', action='store_false', dest='freeze_vit',
+                        help='Unfreeze ViT backbone (train all parameters)')
 
     # Training arguments
     parser.add_argument('--epochs', type=int, default=150,
@@ -697,7 +711,7 @@ def parse_args():
     # Loss weights
     parser.add_argument('--lambda_rec', type=float, default=1.0,
                         help='Weight for reconstruction loss')
-    parser.add_argument('--lambda_seg', type=float, default=10.0,
+    parser.add_argument('--lambda_seg', type=float, default=1.0,
                         help='Weight for segmentation loss')
     parser.add_argument('--lambda_percep', type=float, default=0.1,
                         help='Weight for perceptual loss')
