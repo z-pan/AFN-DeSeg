@@ -546,8 +546,8 @@ def train(args):
         vit_depth=12,
         vit_num_heads=12,
         vit_patch_size=16,
-        lora_r=16,
-        lora_alpha=16
+        lora_r=args.lora_r,
+        lora_alpha=args.lora_alpha
     )
     model = model.to(device)
 
@@ -571,9 +571,14 @@ def train(args):
         use_cellpose=args.use_cellpose
     )
 
-    # Initialize optimizer (AdamW with weight decay)
+    # Print trainable parameter count
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total = sum(p.numel() for p in model.parameters())
+    print(f"Parameters: {total:,} total | {trainable:,} trainable")
+
+    # Initialize optimizer (only trainable params to save memory)
     optimizer = AdamW(
-        model.parameters(),
+        model.get_trainable_params(),
         lr=args.lr,
         weight_decay=args.weight_decay
     )
@@ -715,8 +720,14 @@ def parse_args():
     # Model arguments
     parser.add_argument('--pretrained_vit', type=str, default=None,
                         help='Path to pretrained ViT weights')
-    parser.add_argument('--freeze_vit', action='store_true',
-                        help='Freeze ViT backbone (only train LoRA)')
+    parser.add_argument('--freeze_vit', action='store_true', default=True,
+                        help='Freeze ViT backbone (only train LoRA) [default: True]')
+    parser.add_argument('--no_freeze_vit', action='store_false', dest='freeze_vit',
+                        help='Unfreeze ViT backbone (train all parameters)')
+    parser.add_argument('--lora_r', type=int, default=32,
+                        help='LoRA rank (must match Stage 1)')
+    parser.add_argument('--lora_alpha', type=int, default=32,
+                        help='LoRA alpha (must match Stage 1)')
 
     # Training arguments
     parser.add_argument('--epochs', type=int, default=150,
@@ -735,7 +746,7 @@ def parse_args():
     # Loss weights
     parser.add_argument('--lambda_rec', type=float, default=1.0,
                         help='Weight for reconstruction loss')
-    parser.add_argument('--lambda_seg', type=float, default=10.0,
+    parser.add_argument('--lambda_seg', type=float, default=1.0,
                         help='Weight for segmentation loss')
     parser.add_argument('--lambda_percep', type=float, default=0.1,
                         help='Weight for perceptual loss')

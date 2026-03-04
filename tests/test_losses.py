@@ -95,7 +95,7 @@ class TestAFNJointLoss:
         """Create loss function without Cellpose for testing."""
         return AFNJointLoss(
             lambda_rec=1.0,
-            lambda_seg=10.0,
+            lambda_seg=1.0,
             lambda_percep=0.1,
             use_cellpose=False  # Use placeholder for testing
         )
@@ -123,7 +123,7 @@ class TestAFNJointLoss:
         weights = loss_fn.get_loss_weights()
 
         assert weights['lambda_rec'] == 1.0
-        assert weights['lambda_seg'] == 10.0
+        assert weights['lambda_seg'] == 1.0
         assert weights['lambda_percep'] == 0.1
 
     def test_set_loss_weights(self, loss_fn):

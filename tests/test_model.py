@@ -51,6 +51,10 @@ class TestAFNDeSeg:
 
         denoised, segmented = model(x)
 
+        # Denoised should be in [0, 1] due to sigmoid
+        assert denoised.min() >= 0.0
+        assert denoised.max() <= 1.0
+
         # Segmentation should be in [0, 1] due to sigmoid
         assert segmented.min() >= 0.0
         assert segmented.max() <= 1.0

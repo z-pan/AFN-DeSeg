@@ -11,7 +11,7 @@ Where:
     - L_seg: Segmentation loss (Dice + BCE)
     - L_percep: Perceptual loss (MSE on Cellpose features)
 
-Default weights: λ_rec=1.0, λ_seg=10.0, λ_percep=0.1
+Default weights: λ_rec=1.0, λ_seg=1.0, λ_percep=0.1
 """
 
 from typing import Dict, Tuple, Optional, List
@@ -507,9 +507,9 @@ class AFNJointLoss(nn.Module):
         - L_seg = Dice(seg_pred, seg_gt) + BCE(seg_pred, seg_gt)
         - L_percep = MSE(Cellpose_features(denoised_pred), Cellpose_features(clean_gt))
 
-    Default weights (from paper):
+    Default weights:
         - λ_rec = 1.0
-        - λ_seg = 10.0 (higher to prevent restoration from dominating)
+        - λ_seg = 1.0 (balanced with reconstruction to allow both branches to learn)
         - λ_percep = 0.1 (soft constraint to suppress artifacts)
 
     Args:
@@ -531,7 +531,7 @@ class AFNJointLoss(nn.Module):
     def __init__(
         self,
         lambda_rec: float = 1.0,
-        lambda_seg: float = 10.0,
+        lambda_seg: float = 1.0,
         lambda_percep: float = 0.1,
         use_cellpose: bool = True
     ):
@@ -646,7 +646,7 @@ class AFNJointLoss(nn.Module):
 
 def create_joint_loss(
     lambda_rec: float = 1.0,
-    lambda_seg: float = 10.0,
+    lambda_seg: float = 1.0,
     lambda_percep: float = 0.1,
     use_cellpose: bool = True
 ) -> AFNJointLoss:
