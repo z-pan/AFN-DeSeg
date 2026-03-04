@@ -635,13 +635,22 @@ def train(args):
         metrics = {**train_metrics, **val_metrics, 'epoch': epoch, 'lr': optimizer.param_groups[0]['lr']}
         history.append(metrics)
 
-        # Print epoch summary
+        # Print epoch summary with individual loss components
         print(f"Epoch {epoch}/{args.epochs} | "
               f"Train Loss: {metrics['train_loss']:.4f} | "
               f"Val Loss: {metrics['val_loss']:.4f} | "
               f"Val Dice: {metrics['val_dice']:.4f} | "
               f"Val PSNR: {metrics['val_psnr']:.2f} dB | "
               f"LR: {metrics['lr']:.2e}")
+        # Log individual loss components for diagnostics
+        rec_key = 'train_loss_rec'
+        seg_key = 'train_loss_seg'
+        percep_key = 'train_loss_percep'
+        if rec_key in metrics:
+            print(f"  Loss breakdown: "
+                  f"L_rec={metrics[rec_key]:.4f} "
+                  f"L_seg={metrics[seg_key]:.4f} "
+                  f"L_percep={metrics.get(percep_key, 0):.4f}")
 
         # Save best model
         if val_metrics['val_dice'] > best_dice:
@@ -718,8 +727,8 @@ def parse_args():
                         help='Max gradient norm for clipping')
 
     # Loss weights
-    parser.add_argument('--lambda_rec', type=float, default=1.0,
-                        help='Weight for reconstruction loss')
+    parser.add_argument('--lambda_rec', type=float, default=5.0,
+                        help='Weight for reconstruction loss (default 5.0 to balance with seg)')
     parser.add_argument('--lambda_seg', type=float, default=1.0,
                         help='Weight for segmentation loss')
     parser.add_argument('--lambda_percep', type=float, default=0.1,
