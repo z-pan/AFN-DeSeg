@@ -568,8 +568,7 @@ def train(args: argparse.Namespace) -> None:
         metrics = {**train_metrics, **val_metrics, 'epoch': epoch, 'lr': current_lr}
         history.append(metrics)
 
-        # Print one-line epoch summary
-        # 'loss_total' is the key returned by AFNJointLoss
+        # Print epoch summary with loss breakdown
         t_loss = train_metrics.get('train_loss_total', float('nan'))
         print(
             f"Epoch {epoch:3d}/{args.epochs}  "
@@ -579,6 +578,12 @@ def train(args: argparse.Namespace) -> None:
             f"val_psnr={val_metrics['val_psnr']:.2f} dB  "
             f"lr={current_lr:.2e}"
         )
+        # Per-component loss breakdown for diagnostics
+        l_rec = train_metrics.get('train_loss_rec', 0)
+        l_seg = train_metrics.get('train_loss_seg', 0)
+        l_percep = train_metrics.get('train_loss_percep', 0)
+        if l_rec or l_seg:
+            print(f"  Loss breakdown: L_rec={l_rec:.4f}  L_seg={l_seg:.4f}  L_percep={l_percep:.4f}")
 
         # Always save latest checkpoint so Colab sessions can resume
         save_checkpoint(
@@ -649,8 +654,8 @@ def parse_args() -> argparse.Namespace:
                    help='Early stopping patience in epochs')
 
     # ---- loss ----
-    p.add_argument('--lambda_rec',    type=float, default=5.0,
-                   help='Reconstruction loss weight (5.0 to balance seg gradients)')
+    p.add_argument('--lambda_rec',    type=float, default=1.0,
+                   help='Reconstruction loss weight')
     p.add_argument('--lambda_seg',    type=float, default=1.0,
                    help='Segmentation loss weight')
     p.add_argument('--lambda_percep', type=float, default=0.1)

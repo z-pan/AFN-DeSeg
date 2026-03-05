@@ -583,8 +583,11 @@ class DenoisingDecoder(nn.Module):
             self.decoder_blocks.append(DecoderBlock(current_ch, skip_ch, out_ch))
             current_ch = out_ch
 
-        # Final output layer (raw residual, no activation — used with residual learning)
-        self.output = nn.Conv2d(current_ch, 1, kernel_size=1)
+        # Final output layer — Tanh bounds residual to [-1, 1] for numerical stability
+        self.output = nn.Sequential(
+            nn.Conv2d(current_ch, 1, kernel_size=1),
+            nn.Tanh()
+        )
 
     def forward(
         self,
