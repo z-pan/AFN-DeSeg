@@ -489,7 +489,7 @@ def train(args: argparse.Namespace) -> None:
     ).to(device)
 
     optimizer = AdamW(
-        model.parameters(),
+        model.get_trainable_params(),
         lr=args.lr,
         weight_decay=args.weight_decay,
     )
@@ -649,8 +649,10 @@ def parse_args() -> argparse.Namespace:
                    help='Early stopping patience in epochs')
 
     # ---- loss ----
-    p.add_argument('--lambda_rec',    type=float, default=1.0)
-    p.add_argument('--lambda_seg',    type=float, default=10.0)
+    p.add_argument('--lambda_rec',    type=float, default=5.0,
+                   help='Reconstruction loss weight (5.0 to balance seg gradients)')
+    p.add_argument('--lambda_seg',    type=float, default=1.0,
+                   help='Segmentation loss weight')
     p.add_argument('--lambda_percep', type=float, default=0.1)
     p.add_argument('--use_cellpose',  action='store_true', default=True)
     p.add_argument('--no_cellpose',   action='store_false', dest='use_cellpose',
