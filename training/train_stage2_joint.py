@@ -110,7 +110,13 @@ class TPAFDataset(Dataset):
     ):
         """
         Args:
-            data_dir: Root directory containing noisy/, clean/, masks/ folders.
+            data_dir: Root directory. Two layouts are supported:
+
+              (a) Split-aware  — data_dir/{split}/noisy/ , clean/ , masks/
+                  (matches train_stage2_colab.py; preferred when present)
+              (b) Flat + auto-split — data_dir/noisy/ , clean/ , masks/
+                  Deterministic 85 % train / 15 % val split by sorted filename.
+
             split: Dataset split ('train', 'val', 'test').
             img_size: Image size (assumes square images).
             augment: Whether to apply data augmentation.
@@ -120,36 +126,56 @@ class TPAFDataset(Dataset):
         self.img_size = img_size
         self.augment = augment and (split == 'train')
 
-        # Find image files
-        self.noisy_dir = self.data_dir / 'noisy'
-        self.clean_dir = self.data_dir / 'clean'
-        self.mask_dir = self.data_dir / 'masks'
+        # Auto-detect layout:
+        # (a) data_dir/{split}/noisy/  — split-aware physical directories
+        # (b) data_dir/noisy/          — flat, split done in _get_samples()
+        split_dir = self.data_dir / split
+        if (split_dir / 'noisy').exists():
+            self.noisy_dir = split_dir / 'noisy'
+            self.clean_dir = split_dir / 'clean'
+            self.mask_dir  = split_dir / 'masks'
+            self._auto_split = False
+        else:
+            self.noisy_dir = self.data_dir / 'noisy'
+            self.clean_dir = self.data_dir / 'clean'
+            self.mask_dir  = self.data_dir / 'masks'
+            self._auto_split = True
 
         # Get list of samples (by filename without extension)
         self.samples = self._get_samples()
 
     def _get_samples(self):
-        """Get list of sample names from noisy directory, filtered by split.
+        """Get list of sample names from noisy directory.
 
-        Uses a deterministic 85/15 train/val split based on sorted filenames.
+        Layout (a) — split-aware dirs: returns all files in noisy_dir.
+        Layout (b) — flat dir: deterministic 85/15 split by sorted filename.
         """
-        all_samples = []
+        if not self.noisy_dir.exists():
+            raise FileNotFoundError(
+                f"noisy/ directory not found: {self.noisy_dir}\n"
+                f"Expected one of:\n"
+                f"  (a) {self.data_dir / self.split / 'noisy'}  (split-aware)\n"
+                f"  (b) {self.data_dir / 'noisy'}               (flat, auto-split)"
+            )
 
-        if self.noisy_dir.exists():
-            for f in self.noisy_dir.iterdir():
-                if f.suffix in ['.npy', '.png', '.tif', '.tiff']:
-                    all_samples.append(f.stem)
+        all_samples = sorted(
+            f.stem for f in self.noisy_dir.iterdir()
+            if f.suffix in ['.npy', '.png', '.tif', '.tiff']
+        )
 
-        all_samples = sorted(all_samples)
+        if not all_samples:
+            raise ValueError(f"No images found in {self.noisy_dir}")
 
+        if not self._auto_split:
+            return all_samples
+
+        # Flat layout: deterministic 85/15 split by sorted filename index
+        split_idx = int(len(all_samples) * 0.85)
         if self.split == 'train':
-            split_idx = int(len(all_samples) * 0.85)
             return all_samples[:split_idx]
         elif self.split == 'val':
-            split_idx = int(len(all_samples) * 0.85)
             return all_samples[split_idx:]
-        else:
-            return all_samples
+        return all_samples
 
     def _load_image(self, path: Path) -> np.ndarray:
         """Load image from various formats."""

@@ -126,7 +126,6 @@ class SegmentationLoss(nn.Module):
         self.bce_weight = bce_weight
 
         self.dice_loss = DiceLoss()
-        self.bce_loss = nn.BCELoss()
 
     def forward(
         self,
@@ -144,7 +143,12 @@ class SegmentationLoss(nn.Module):
             Tuple of (total_loss, dice_loss, bce_loss).
         """
         dice = self.dice_loss(pred, target)
-        bce = self.bce_loss(pred, target)
+        # PyTorch 2.x blocks binary_cross_entropy inside any autocast context at
+        # the dispatcher level (regardless of tensor dtype).  Explicitly disable
+        # autocast for this single op; the model already applies sigmoid so we
+        # cannot use BCEWithLogitsLoss without also changing the architecture.
+        with torch.amp.autocast(device_type='cuda', enabled=False):
+            bce = F.binary_cross_entropy(pred.float(), target.float())
 
         total = self.dice_weight * dice + self.bce_weight * bce
 
@@ -181,6 +185,7 @@ class CellposeFeatureExtractor(nn.Module):
         # Lazy initialization flag
         self._initialized = False
         self._cpnet = None
+        self._incompatible = False   # True when Cellpose ≥4.0 SAM backbone detected
 
         # Feature hooks storage
         self._features: Dict[str, torch.Tensor] = {}
@@ -192,7 +197,6 @@ class CellposeFeatureExtractor(nn.Module):
 
         try:
             from cellpose import models
-            from cellpose.resnet_torch import CPnet
         except ImportError:
             raise ImportError(
                 "Cellpose is required for perceptual loss. "
@@ -207,6 +211,22 @@ class CellposeFeatureExtractor(nn.Module):
 
         # Get the CPnet (the neural network component)
         self._cpnet = cp_model.net
+
+        # Cellpose ≥4.0 replaced CPnet with a SAM-based ViT backbone.
+        # That architecture has no downsample/upsample blocks, so our
+        # feature hooks cannot be registered.  Mark as incompatible and
+        # skip hook registration; forward() will return an empty dict,
+        # making the perceptual loss contribution zero for this run.
+        if not (hasattr(self._cpnet, 'downsample') and hasattr(self._cpnet, 'upsample')):
+            print(
+                "[PerceptualLoss] Warning: Cellpose ≥4.0 SAM backbone detected. "
+                "Feature hooks are not supported in this version. "
+                "Cellpose perceptual loss will be zero for this training run. "
+                "Pass --no_cellpose to use the placeholder perceptual loss instead."
+            )
+            self._incompatible = True
+            self._initialized = True
+            return
 
         # Freeze all weights
         for param in self._cpnet.parameters():
@@ -227,27 +247,45 @@ class CellposeFeatureExtractor(nn.Module):
         # - upsample blocks (decoder)
         # We need bottleneck (end of encoder) and first upsample layer
 
-        def get_hook(name):
+        def get_hook(name, pick_last: bool = True):
+            """
+            pick_last=True  → take output[-1] when output is a list/tuple
+                               (Cellpose 3.x downsample returns all encoder levels;
+                                deepest = last = bottleneck).
+            pick_last=False → take output[0]
+                               (upsample returns progressively upsampled maps;
+                                first = finest-grained decoder level).
+            If output is already a Tensor, store it as-is.
+            """
             def hook(module, input, output):
-                self._features[name] = output
+                if isinstance(output, (list, tuple)):
+                    feat = output[-1] if pick_last else output[0]
+                else:
+                    feat = output
+                self._features[name] = feat
             return hook
 
-        # Hook into the bottleneck (last downsample output)
-        # In CPnet, this is typically after the encoder before upsampling
+        # Hook into the bottleneck (last downsample output).
+        # Cellpose 2.x: downsample is a ModuleList — hook the last element.
+        # Cellpose 3.x: downsample is a single nn.Module — hook it directly.
         if hasattr(self._cpnet, 'downsample'):
-            # Get the last downsample block for bottleneck features
-            num_down = len(self._cpnet.downsample)
-            if num_down > 0:
-                self._cpnet.downsample[-1].register_forward_hook(
-                    get_hook('bottleneck')
-                )
+            ds = self._cpnet.downsample
+            try:
+                target = ds[-1] if len(ds) > 0 else None
+            except TypeError:
+                target = ds
+            if target is not None:
+                target.register_forward_hook(get_hook('bottleneck', pick_last=True))
 
-        # Hook into the first upsample layer
+        # Hook into the first upsample layer (same dual-version logic).
         if hasattr(self._cpnet, 'upsample'):
-            if len(self._cpnet.upsample) > 0:
-                self._cpnet.upsample[0].register_forward_hook(
-                    get_hook('upsample1')
-                )
+            us = self._cpnet.upsample
+            try:
+                target = us[0] if len(us) > 0 else None
+            except TypeError:
+                target = us
+            if target is not None:
+                target.register_forward_hook(get_hook('upsample1', pick_last=False))
 
     def _z_score_normalize(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -277,6 +315,11 @@ class CellposeFeatureExtractor(nn.Module):
         """
         device = x.device
         self._ensure_initialized(device)
+
+        # SAM-based Cellpose 4.x: hooks unavailable, return empty dict so
+        # PerceptualLoss.forward produces zero loss without crashing.
+        if self._incompatible:
+            return {}
 
         # Clear previous features
         self._features = {}
@@ -369,14 +412,33 @@ class PerceptualLoss(nn.Module):
 
         for layer_name, weight in self.feature_weights.items():
             if layer_name in pred_features and layer_name in target_features:
-                layer_loss = self.mse_loss(
-                    pred_features[layer_name],
-                    target_features[layer_name]
-                )
+                # Standardize each feature map to zero-mean, unit-std before
+                # MSE.  Cellpose activations are unbounded (can be O(100)),
+                # so raw MSE produces huge, unstable values; standardisation
+                # makes the perceptual loss scale-invariant and bounded.
+                p_feat = self._standardize_feat(pred_features[layer_name])
+                t_feat = self._standardize_feat(target_features[layer_name])
+                layer_loss = self.mse_loss(p_feat, t_feat)
                 layer_losses[layer_name] = layer_loss
                 total_loss = total_loss + weight * layer_loss
 
         return total_loss, layer_losses
+
+    @staticmethod
+    def _standardize_feat(feat: torch.Tensor) -> torch.Tensor:
+        """
+        L2-norm normalisation: map each sample's feature vector to unit norm.
+
+        MSE between two unit-norm vectors is strictly in [0, 4], regardless
+        of activation magnitudes or distribution shape.  This replaces the
+        previous z-score approach which could amplify features with small std
+        (e.g. std=1e-4) by 10 000× before computing MSE.
+        """
+        flat = feat.view(feat.shape[0], -1)            # (B, C*H*W)
+        norm = flat.norm(dim=1, keepdim=True) \
+                   .clamp(min=1e-5) \
+                   .view(feat.shape[0], *([1] * (feat.dim() - 1)))
+        return feat / norm
 
 
 class PerceptualLossPlaceholder(nn.Module):
