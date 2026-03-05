@@ -46,7 +46,7 @@ data:
 # =============================================================================
 loss:
   # Loss weights
-  lambda_rec: 5.0      # Reconstruction loss (L1) - higher weight to balance seg gradients
+  lambda_rec: 1.0      # Reconstruction loss (L1)
   lambda_seg: 1.0      # Segmentation loss (Dice + BCE)
   lambda_percep: 0.1   # Perceptual loss (Cellpose features)
 
