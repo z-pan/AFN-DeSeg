@@ -583,11 +583,8 @@ class DenoisingDecoder(nn.Module):
             self.decoder_blocks.append(DecoderBlock(current_ch, skip_ch, out_ch))
             current_ch = out_ch
 
-        # Final output layer (single channel intensity map, sigmoid for [0,1] range)
-        self.output = nn.Sequential(
-            nn.Conv2d(current_ch, 1, kernel_size=1),
-            nn.Sigmoid()
-        )
+        # Final output layer (raw residual, no activation — used with residual learning)
+        self.output = nn.Conv2d(current_ch, 1, kernel_size=1)
 
     def forward(
         self,
@@ -808,6 +805,12 @@ class AFNDeSeg(nn.Module):
                 - denoised: Denoised intensity map (B, 1, H, W).
                 - segmented: Segmentation probability map (B, 1, H, W).
         """
+        # Recover original [0,1] grayscale from ImageNet-normalized input
+        # (all 3 channels are identical for pseudo-RGB TPAF)
+        mean = torch.tensor(self.IMAGENET_MEAN, device=x.device).view(1, 3, 1, 1)
+        std = torch.tensor(self.IMAGENET_STD, device=x.device).view(1, 3, 1, 1)
+        input_gray = (x * std + mean).mean(dim=1, keepdim=True)  # (B, 1, H, W)
+
         # U-Net encoder
         unet_bottleneck, skip_connections = self.unet_encoder(x)
 
@@ -817,8 +820,12 @@ class AFNDeSeg(nn.Module):
         # Feature fusion
         fused = self.fusion(unet_bottleneck, vit_tokens, self.vit_grid_size)
 
-        # Dual decoders
-        denoised = self.denoising_decoder(fused, skip_connections)
+        # Denoising decoder: residual learning
+        # Decoder predicts noise residual, added to input for clean reconstruction
+        residual = self.denoising_decoder(fused, skip_connections)
+        denoised = torch.clamp(input_gray + residual, 0.0, 1.0)
+
+        # Segmentation decoder
         segmented = self.segmentation_decoder(fused, skip_connections)
 
         return denoised, segmented

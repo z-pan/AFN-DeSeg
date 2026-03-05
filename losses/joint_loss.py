@@ -293,9 +293,15 @@ class CellposeFeatureExtractor(nn.Module):
         # Z-score normalize
         x_norm = self._z_score_normalize(x)
 
-        # Forward pass through Cellpose (no grad needed)
-        with torch.no_grad():
-            _ = self._cpnet(x_norm)
+        # Forward pass through Cellpose
+        # Note: weights are frozen (requires_grad=False) but we need the
+        # computation graph so gradients flow back to the input for perceptual loss
+        output = self._cpnet(x_norm)
+
+        # If hooks didn't capture features, fall back to direct output comparison
+        if not self._features:
+            # Hooks may not match CPnet structure; use raw output as fallback
+            self._features['output'] = output
 
         return self._features.copy()
 
@@ -330,7 +336,8 @@ class PerceptualLoss(nn.Module):
         if feature_weights is None:
             self.feature_weights = {
                 'bottleneck': 1.0,
-                'upsample1': 1.0
+                'upsample1': 1.0,
+                'output': 1.0,  # Fallback if hooks don't capture intermediate features
             }
         else:
             self.feature_weights = feature_weights
@@ -418,9 +425,9 @@ class PerceptualLossPlaceholder(nn.Module):
         Returns:
             Tuple of (total_loss, empty dict).
         """
-        with torch.no_grad():
-            pred_feat = self.features(pred)
-            target_feat = self.features(target)
+        # Weights are frozen but we need gradient flow through input
+        pred_feat = self.features(pred)
+        target_feat = self.features(target)
 
         loss = self.mse_loss(pred_feat, target_feat)
         return loss, {'placeholder': loss}
