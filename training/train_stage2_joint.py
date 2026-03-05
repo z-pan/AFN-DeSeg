@@ -753,8 +753,8 @@ def parse_args():
                         help='Max gradient norm for clipping')
 
     # Loss weights
-    parser.add_argument('--lambda_rec', type=float, default=5.0,
-                        help='Weight for reconstruction loss (default 5.0 to balance with seg)')
+    parser.add_argument('--lambda_rec', type=float, default=1.0,
+                        help='Weight for reconstruction loss')
     parser.add_argument('--lambda_seg', type=float, default=1.0,
                         help='Weight for segmentation loss')
     parser.add_argument('--lambda_percep', type=float, default=0.1,
