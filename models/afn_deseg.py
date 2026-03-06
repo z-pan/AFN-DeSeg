@@ -617,7 +617,7 @@ class SegmentationDecoder(nn.Module):
     """
     Segmentation Decoder.
 
-    Outputs binary segmentation mask with sigmoid activation.
+    Outputs binary segmentation logits (apply sigmoid externally for probabilities).
 
     Args:
         in_channels: Input channels from fusion block.
@@ -643,11 +643,8 @@ class SegmentationDecoder(nn.Module):
             self.decoder_blocks.append(DecoderBlock(current_ch, skip_ch, out_ch))
             current_ch = out_ch
 
-        # Final output layer with sigmoid (binary mask)
-        self.output = nn.Sequential(
-            nn.Conv2d(current_ch, 1, kernel_size=1),
-            nn.Sigmoid()
-        )
+        # Final output layer — raw logits (use BCEWithLogitsLoss for AMP safety)
+        self.output = nn.Conv2d(current_ch, 1, kernel_size=1)
 
     def forward(
         self,
