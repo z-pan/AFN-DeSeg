@@ -584,6 +584,8 @@ def train(args: argparse.Namespace) -> None:
         l_percep = train_metrics.get('train_loss_percep', 0)
         if l_rec or l_seg:
             print(f"  Loss breakdown: L_rec={l_rec:.4f}  L_seg={l_seg:.4f}  L_percep={l_percep:.4f}")
+        if epoch == 1 and args.lambda_percep > 0 and l_percep == 0:
+            print("  WARNING: L_percep=0 but lambda_percep>0. Cellpose hooks may not be capturing features.")
 
         # Always save latest checkpoint so Colab sessions can resume
         save_checkpoint(
@@ -658,7 +660,8 @@ def parse_args() -> argparse.Namespace:
                    help='Reconstruction loss weight')
     p.add_argument('--lambda_seg',    type=float, default=1.0,
                    help='Segmentation loss weight')
-    p.add_argument('--lambda_percep', type=float, default=0.1)
+    p.add_argument('--lambda_percep', type=float, default=0.0,
+                   help='Perceptual loss weight (0.0: Cellpose hooks broken, re-enable after fix)')
     p.add_argument('--use_cellpose',  action='store_true', default=True)
     p.add_argument('--no_cellpose',   action='store_false', dest='use_cellpose',
                    help='Disable Cellpose perceptual loss (faster, slightly lower quality)')

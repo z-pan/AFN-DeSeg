@@ -823,13 +823,19 @@ class AFNDeSeg(nn.Module):
         # Feature fusion
         fused = self.fusion(unet_bottleneck, vit_tokens, self.vit_grid_size)
 
-        # Denoising decoder: residual learning
-        # Decoder predicts noise residual, added to input for clean reconstruction
-        residual = self.denoising_decoder(fused, skip_connections)
-        denoised = torch.clamp(input_gray + residual, 0.0, 1.0)
-
-        # Segmentation decoder
+        # --- Gradient isolation for multi-task learning ---
+        # Segmentation decoder: full gradient flow through shared encoder
+        # (segmentation is the primary task and controls encoder features)
         segmented = self.segmentation_decoder(fused, skip_connections)
+
+        # Denoising decoder: gradient-isolated from shared encoder
+        # Uses detached features as read-only context + input residual bypass.
+        # This prevents the two tasks from fighting over encoder weights.
+        residual = self.denoising_decoder(
+            fused.detach(),
+            [s.detach() for s in skip_connections]
+        )
+        denoised = torch.clamp(input_gray + residual, 0.0, 1.0)
 
         return denoised, segmented
 
