@@ -83,7 +83,7 @@ def compute_psnr(pred: torch.Tensor, target: torch.Tensor, max_val: float = 1.0)
 
 
 def compute_dice(pred: torch.Tensor, target: torch.Tensor, threshold: float = 0.5) -> float:
-    pred_bin = (pred > threshold).float()
+    pred_bin = (torch.sigmoid(pred) > threshold).float()
     intersection = (pred_bin * target).sum().item()
     union = pred_bin.sum().item() + target.sum().item()
     if union < 1e-6:

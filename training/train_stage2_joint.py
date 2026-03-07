@@ -72,7 +72,7 @@ def compute_dice(pred: torch.Tensor, target: torch.Tensor, threshold: float = 0.
     Returns:
         Dice coefficient value.
     """
-    pred_binary = (pred > threshold).float()
+    pred_binary = (torch.sigmoid(pred) > threshold).float()
 
     intersection = (pred_binary * target).sum().item()
     union = pred_binary.sum().item() + target.sum().item()
