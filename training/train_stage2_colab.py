@@ -286,7 +286,7 @@ def load_checkpoint(
     scheduler: Optional[torch.optim.lr_scheduler._LRScheduler] = None,
     scaler: Optional[GradScaler] = None,
 ) -> Dict:
-    ckpt = torch.load(path, map_location='cpu')
+    ckpt = torch.load(path, map_location='cpu', weights_only=False)
     model.load_state_dict(ckpt['model_state_dict'])
     if optimizer and 'optimizer_state_dict' in ckpt:
         optimizer.load_state_dict(ckpt['optimizer_state_dict'])
@@ -306,7 +306,7 @@ def load_vit_weights(model: AFNDeSeg, path: str, device: torch.device) -> None:
       (b) Raw full-model state dict     →  keys begin with 'vit_encoder.'
       (c) Raw ViT-only state dict       →  keys begin with 'patch_embed.' etc.
     """
-    raw = torch.load(path, map_location=device)
+    raw = torch.load(path, map_location=device, weights_only=False)
 
     # Unwrap checkpoint dict if present
     state = raw.get('model_state_dict', raw)
