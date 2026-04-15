@@ -72,7 +72,7 @@ def compute_dice(pred: torch.Tensor, target: torch.Tensor, threshold: float = 0.
     Returns:
         Dice coefficient value.
     """
-    pred_binary = (pred > threshold).float()
+    pred_binary = (torch.sigmoid(pred) > threshold).float()
 
     intersection = (pred_binary * target).sum().item()
     union = pred_binary.sum().item() + target.sum().item()
@@ -757,8 +757,8 @@ def parse_args():
                         help='Weight for reconstruction loss')
     parser.add_argument('--lambda_seg', type=float, default=1.0,
                         help='Weight for segmentation loss')
-    parser.add_argument('--lambda_percep', type=float, default=0.1,
-                        help='Weight for perceptual loss')
+    parser.add_argument('--lambda_percep', type=float, default=0.0,
+                        help='Weight for perceptual loss (0.0: Cellpose hooks broken)')
     parser.add_argument('--use_cellpose', action='store_true', default=True,
                         help='Use Cellpose for perceptual loss')
     parser.add_argument('--no_cellpose', action='store_false', dest='use_cellpose',

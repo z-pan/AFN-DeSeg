@@ -83,7 +83,7 @@ def compute_psnr(pred: torch.Tensor, target: torch.Tensor, max_val: float = 1.0)
 
 
 def compute_dice(pred: torch.Tensor, target: torch.Tensor, threshold: float = 0.5) -> float:
-    pred_bin = (pred > threshold).float()
+    pred_bin = (torch.sigmoid(pred) > threshold).float()
     intersection = (pred_bin * target).sum().item()
     union = pred_bin.sum().item() + target.sum().item()
     if union < 1e-6:
@@ -286,7 +286,7 @@ def load_checkpoint(
     scheduler: Optional[torch.optim.lr_scheduler._LRScheduler] = None,
     scaler: Optional[GradScaler] = None,
 ) -> Dict:
-    ckpt = torch.load(path, map_location='cpu')
+    ckpt = torch.load(path, map_location='cpu', weights_only=False)
     model.load_state_dict(ckpt['model_state_dict'])
     if optimizer and 'optimizer_state_dict' in ckpt:
         optimizer.load_state_dict(ckpt['optimizer_state_dict'])
@@ -306,7 +306,7 @@ def load_vit_weights(model: AFNDeSeg, path: str, device: torch.device) -> None:
       (b) Raw full-model state dict     →  keys begin with 'vit_encoder.'
       (c) Raw ViT-only state dict       →  keys begin with 'patch_embed.' etc.
     """
-    raw = torch.load(path, map_location=device)
+    raw = torch.load(path, map_location=device, weights_only=False)
 
     # Unwrap checkpoint dict if present
     state = raw.get('model_state_dict', raw)
@@ -584,6 +584,8 @@ def train(args: argparse.Namespace) -> None:
         l_percep = train_metrics.get('train_loss_percep', 0)
         if l_rec or l_seg:
             print(f"  Loss breakdown: L_rec={l_rec:.4f}  L_seg={l_seg:.4f}  L_percep={l_percep:.4f}")
+        if epoch == 1 and args.lambda_percep > 0 and l_percep == 0:
+            print("  WARNING: L_percep=0 but lambda_percep>0. Cellpose hooks may not be capturing features.")
 
         # Always save latest checkpoint so Colab sessions can resume
         save_checkpoint(
@@ -658,7 +660,8 @@ def parse_args() -> argparse.Namespace:
                    help='Reconstruction loss weight')
     p.add_argument('--lambda_seg',    type=float, default=1.0,
                    help='Segmentation loss weight')
-    p.add_argument('--lambda_percep', type=float, default=0.1)
+    p.add_argument('--lambda_percep', type=float, default=0.0,
+                   help='Perceptual loss weight (0.0: Cellpose hooks broken, re-enable after fix)')
     p.add_argument('--use_cellpose',  action='store_true', default=True)
     p.add_argument('--no_cellpose',   action='store_false', dest='use_cellpose',
                    help='Disable Cellpose perceptual loss (faster, slightly lower quality)')

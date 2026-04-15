@@ -86,12 +86,15 @@ class DiceLoss(nn.Module):
         Compute Dice loss.
 
         Args:
-            pred: Predicted probability map (B, 1, H, W), values in [0, 1].
+            pred: Predicted logits (B, 1, H, W) — sigmoid applied internally.
             target: Ground truth binary mask (B, 1, H, W).
 
         Returns:
             Scalar Dice loss value.
         """
+        # Apply sigmoid to convert logits to probabilities
+        pred = torch.sigmoid(pred)
+
         # Flatten spatial dimensions
         pred_flat = pred.view(pred.size(0), -1)
         target_flat = target.view(target.size(0), -1)
@@ -136,19 +139,14 @@ class SegmentationLoss(nn.Module):
         Compute combined segmentation loss.
 
         Args:
-            pred: Predicted probability map (B, 1, H, W), values in [0, 1].
+            pred: Predicted logits (B, 1, H, W) — NOT sigmoid-activated.
             target: Ground truth binary mask (B, 1, H, W).
 
         Returns:
             Tuple of (total_loss, dice_loss, bce_loss).
         """
-        dice = self.dice_loss(pred, target)
-        # PyTorch 2.x blocks binary_cross_entropy inside any autocast context at
-        # the dispatcher level (regardless of tensor dtype).  Explicitly disable
-        # autocast for this single op; the model already applies sigmoid so we
-        # cannot use BCEWithLogitsLoss without also changing the architecture.
-        with torch.amp.autocast(device_type='cuda', enabled=False):
-            bce = F.binary_cross_entropy(pred.float(), target.float())
+        dice = self.dice_loss(pred, target)  # DiceLoss applies sigmoid internally
+        bce = F.binary_cross_entropy_with_logits(pred, target)
 
         total = self.dice_weight * dice + self.bce_weight * bce
 
@@ -577,7 +575,7 @@ class AFNJointLoss(nn.Module):
 
         Args:
             denoised_pred: Predicted denoised image (B, 1, H, W).
-            seg_pred: Predicted segmentation mask (B, 1, H, W), values in [0, 1].
+            seg_pred: Predicted segmentation logits (B, 1, H, W) — raw, no sigmoid.
             clean_gt: Ground truth clean image (B, 1, H, W).
             seg_gt: Ground truth segmentation mask (B, 1, H, W), binary.
 

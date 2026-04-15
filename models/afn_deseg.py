@@ -617,7 +617,7 @@ class SegmentationDecoder(nn.Module):
     """
     Segmentation Decoder.
 
-    Outputs binary segmentation mask with sigmoid activation.
+    Outputs binary segmentation logits (apply sigmoid externally for probabilities).
 
     Args:
         in_channels: Input channels from fusion block.
@@ -643,11 +643,8 @@ class SegmentationDecoder(nn.Module):
             self.decoder_blocks.append(DecoderBlock(current_ch, skip_ch, out_ch))
             current_ch = out_ch
 
-        # Final output layer with sigmoid (binary mask)
-        self.output = nn.Sequential(
-            nn.Conv2d(current_ch, 1, kernel_size=1),
-            nn.Sigmoid()
-        )
+        # Final output layer — raw logits (use BCEWithLogitsLoss for AMP safety)
+        self.output = nn.Conv2d(current_ch, 1, kernel_size=1)
 
     def forward(
         self,
@@ -823,13 +820,19 @@ class AFNDeSeg(nn.Module):
         # Feature fusion
         fused = self.fusion(unet_bottleneck, vit_tokens, self.vit_grid_size)
 
-        # Denoising decoder: residual learning
-        # Decoder predicts noise residual, added to input for clean reconstruction
-        residual = self.denoising_decoder(fused, skip_connections)
-        denoised = torch.clamp(input_gray + residual, 0.0, 1.0)
-
-        # Segmentation decoder
+        # --- Gradient isolation for multi-task learning ---
+        # Segmentation decoder: full gradient flow through shared encoder
+        # (segmentation is the primary task and controls encoder features)
         segmented = self.segmentation_decoder(fused, skip_connections)
+
+        # Denoising decoder: gradient-isolated from shared encoder
+        # Uses detached features as read-only context + input residual bypass.
+        # This prevents the two tasks from fighting over encoder weights.
+        residual = self.denoising_decoder(
+            fused.detach(),
+            [s.detach() for s in skip_connections]
+        )
+        denoised = torch.clamp(input_gray + residual, 0.0, 1.0)
 
         return denoised, segmented
 
