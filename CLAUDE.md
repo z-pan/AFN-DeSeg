@@ -1,61 +1,116 @@
-# AFN-DeSeg — Developer Guide
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Project
+
+AFN-DeSeg is a dual-encoder deep learning framework for joint denoising and nuclear segmentation of Two-Photon Autofluorescence (TPAF) microscopy images, with downstream Key Diagnostic Area (KDA) prediction. Published in Nature Communications.
+
+## Commands
+
+```bash
+# Install dependencies
+pip install -r requirements.txt
+
+# Run all tests
+pytest tests/ -v
+
+# Run a single test file
+pytest tests/test_model.py -v
+
+# Run a specific test
+pytest tests/test_model.py::test_forward_pass -v
+
+# Stage 1: DINO domain adaptation (self-supervised, unlabeled data)
+python training/train_stage1_dino.py --data_dir <unlabeled_images> --output_dir <output>
+
+# Stage 2: Joint denoising + segmentation (supervised)
+python training/train_stage2_joint.py --data_dir <data> --output_dir <output> --pretrained_vit <stage1_weights>
+
+# Stage 2 on Colab (AMP-enabled variant)
+python training/train_stage2_colab.py --data_dir <data> --output_dir <output> --pretrained_vit <stage1_weights> --freeze_vit --lora_r 32
+
+# Inference
+python inference/predict.py --checkpoint <model.pth> --input <images> --output <results>
+```
 
 ## Architecture
 
-AFN-DeSeg uses a **dual-encoder** design that combines local spatial features from a U-Net with global semantic context from a frozen DINOv3 Vision Transformer.
+### Dual-Encoder Design
 
-**U-Net encoder** — 4 downsampling blocks with channel progression 64 → 128 → 256 → 512. Produces a bottleneck tensor at 1/16 input resolution and a `skip_connections` list (one entry per encoder level) used by both decoders.
+The core model (`models/afn_deseg.py`) has two parallel encoders feeding into two parallel decoders via a fusion block.
 
-**DINOv3 ViT encoder** — ViT-Base/16 (768-dim, 12 heads, depth 12). Processes pseudo-RGB input (3-channel repeat of the grayscale TPAF image with ImageNet normalisation). Only the Q and V projection matrices in each attention block receive LoRA adapters (r=32, α=32 by default); the rest of the backbone is frozen.
+**U-Net encoder** — 4 downsampling blocks, channel progression 64 → 128 → 256 → 512. Produces a bottleneck tensor at 1/16 input resolution and a `skip_connections` list used by both decoders.
 
-**Feature fusion block** — Concatenates the U-Net bottleneck (512 ch) with spatially-reshaped ViT patch tokens (768 ch, bicubic-upsampled to match spatial dims), then merges via a 1×1 conv followed by a 3×3 conv.
+**DINOv2 ViT encoder** — ViT-Base/16 (768-dim, 12 heads, depth 12). Processes pseudo-RGB input (3-channel repeat of the grayscale TPAF image with ImageNet normalisation). Only Q and V projection matrices receive LoRA adapters (r=32, α=32 by default); the rest of the backbone is frozen.
 
-**Denoising decoder** — Residual learning: predicts a signed residual (Tanh-bounded), which is added to the recovered input grayscale and clamped to [0, 1]. Single-channel output. Shares `fused` and `skip_connections` with the segmentation decoder.
+**Feature fusion block** — Concatenates U-Net bottleneck (512 ch) with spatially-reshaped ViT patch tokens (768 ch, bicubic-upsampled to match spatial dims), then merges via 1×1 conv → 3×3 conv.
 
-**Segmentation decoder** — Predicts a per-pixel probability map via sigmoid. Binary mask at inference is obtained by thresholding at 0.5. Shares `fused` and `skip_connections` with the denoising decoder.
+**Denoising decoder** — Residual learning: predicts a Tanh-bounded signed residual added to the recovered input grayscale, then clamped to [0, 1]. Single-channel output.
+
+**Segmentation decoder** — Predicts a per-pixel probability map via sigmoid. Binary mask at inference by thresholding at 0.5.
+
+### Gradient Isolation
+
+The denoising decoder receives `fused.detach()` and `[s.detach() for s in skip_connections]`. This means:
+- The shared encoder is trained **only** by segmentation loss
+- The denoising decoder trains independently on frozen encoder features
+- This prevents multi-task gradient conflict between L_rec and L_seg
+- **Do NOT remove the `.detach()` calls on `fused` and `skip_connections` in the denoising decoder — removing them causes segmentation loss to corrupt the denoising decoder.**
+
+### LoRA on ViT
+
+LoRA (`models/afn_deseg.py: LoRALinear`) adapts the frozen DINOv2 ViT by adding low-rank matrices to Q/V projections. Stage 1 pretrains these LoRA weights via DINO self-supervised learning on unlabeled TPAF images. Stage 2 fine-tunes them jointly.
+
+### Loss Functions
+
+`losses/joint_loss.py` computes: `L_total = λ_rec * L1(denoised, clean) + λ_seg * (Dice + BCE)(probs, mask)`
+
+Key details:
+- SegmentationDecoder outputs **sigmoid probabilities** — `BCELoss` is used; the loss must be wrapped in `torch.amp.autocast(device_type='cuda', enabled=False)` to avoid the PyTorch 2.x AMP dispatcher block
+- `DiceLoss` also receives sigmoid probabilities directly
+- DenoisingDecoder uses **residual learning**: output is Tanh-bounded noise residual, not the clean image directly
+- **Perceptual loss is permanently disabled (`lambda_percep=0.0`) — do NOT enable it. The Cellpose feature hook causes training crashes.**
+
+### Two-Stage Training Pipeline
+
+1. **Stage 1** (`training/train_stage1_dino.py`): Self-supervised DINO distillation on unlabeled TPAF images. Trains LoRA weights + student/teacher ViT. Output: `best_dino_encoder.pth`
+2. **Stage 2** (`training/train_stage2_joint.py` or `train_stage2_colab.py`): Supervised joint training. Loads Stage 1 ViT weights, freezes ViT backbone (only LoRA trainable), trains U-Net encoder + both decoders. Output: `best_model.pth`
+
+### KDA Pipeline (Downstream)
+
+`models/attention_unet.py` — Separate Attention U-Net that takes binary nuclear masks from AFN-DeSeg and predicts Key Diagnostic Areas. Trained independently via `training/kda_trainer.py`.
+
+## Data Format
+
+Stage 2 expects triplets (noisy image, clean image, binary mask) in either layout:
+
+```
+# Split-aware (preferred)          # Flat (auto-splits 85/15)
+data_dir/                           data_dir/
+├── train/                          ├── noisy/
+│   ├── noisy/                      ├── clean/
+│   ├── clean/                      └── masks/
+│   └── masks/
+└── val/
+    ├── noisy/
+    ├── clean/
+    └── masks/
+```
+
+Supported formats: `.npy`, `.png`, `.tif`. Files are matched by filename across subdirectories. On Windows, use `--copy` with `data_prep/step3_build_splits.py` to avoid symlink privilege errors (WinError 1314).
 
 ## Key Conventions
 
-- Single-channel TPAF images are repeated across 3 channels to form pseudo-RGB before ViT input; ImageNet mean/std normalisation is applied (`data.imagenet_mean/std` in `configs/default_config.yaml`).
-- LoRA adapters are the only trainable ViT parameters by default (`freeze_vit=True`); adapter rank and alpha are set at model construction time via `lora_r` / `lora_alpha`.
-- The sigmoid on the segmentation output is applied inside `SegmentationDecoder.forward()` — it is **not** re-applied inside the loss. The denoising output uses `torch.clamp` after residual addition, not sigmoid.
-- Masks are stored as uint8 TIFF (patch-selected training images) or uint16 PNG (raw outputs from Cellpose); `TPAFDataset._load_mask` routes by file extension (tifffile for `.tif/.tiff`, skimage for `.png`).
-- Checkpoints saved by `train_stage2_colab.py` contain the full model `state_dict` and optimiser state; resume training with `--resume <checkpoint_path>`.
-- AMP uses the non-deprecated API: `torch.amp.GradScaler('cuda')` and `torch.amp.autocast('cuda', ...)`. BCE loss must be wrapped in `torch.amp.autocast(device_type='cuda', enabled=False)` to avoid the PyTorch 2.x dispatcher block.
-
-## Gradient Isolation
-
-Both decoders receive the same `fused` features and `skip_connections` from the U-Net encoder. Gradient flow between the two task heads through these shared tensors is **intentional** and enables joint optimisation.
-
-- **Do NOT remove the `.detach()` calls on `fused` and `skip_connections` in the denoising decoder — removing them causes segmentation loss to corrupt the denoising decoder.**
-
-## Loss Weights
-
-Stage 2 joint loss: `L_total = λ_rec · L_rec + λ_seg · L_seg + λ_percep · L_percep`
-
-| Weight | Value | Notes |
-|---|---|---|
-| `lambda_rec` | 1.0 | L1 reconstruction loss |
-| `lambda_seg` | 10.0 | Dice + BCE segmentation loss |
-| `lambda_percep` | 0.0 | **Perceptual loss is permanently disabled (`lambda_percep=0.0`) — do NOT enable it. The Cellpose feature hook causes training crashes.** |
-
-## Data Layout (Stage 2)
-
-Training scripts auto-detect split-aware layout (preferred) or fall back to a flat layout with 85/15 filename-based split:
-
-```
-data_dir/
-  train/
-    noisy/    *.tif
-    clean/    *.tif
-    masks/    *.tif  or  *.png
-  val/
-    noisy/
-    clean/
-    masks/
-```
-
-On Windows, create splits with `--copy` (step3) to avoid symlink privilege errors (WinError 1314).
+- All images are normalised to ImageNet stats before entering the model (mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+- Single-channel TPAF images are converted to pseudo-RGB by `preprocess_tpaf()` (replicate across 3 channels)
+- The denoising decoder recovers original [0,1] grayscale by un-normalising the input before adding the residual
+- `model.get_trainable_params()` returns only the parameters that should be optimised (respects frozen ViT + LoRA)
+- Masks are stored as uint8 TIFF (patch-selected training images) or uint16 PNG (raw Cellpose outputs); `TPAFDataset._load_mask` routes by extension (tifffile for `.tif/.tiff`, skimage for `.png`)
+- AMP uses the non-deprecated API: `torch.amp.GradScaler('cuda')` and `torch.amp.autocast('cuda', ...)`
+- The Colab training script (`train_stage2_colab.py`) uses AMP (FP16) with `GradScaler`; the non-Colab script does not
+- Validation metric for early stopping and best-model saving is `val_dice`
+- `torch.load` calls use `weights_only=False` for PyTorch 2.6+ compatibility
 
 ## Noise Model
 
@@ -67,10 +122,9 @@ Variance scales as `Var[y_N] = (x/a + b²) / N` for N-frame averages. Parameters
 - Synthesis: `noise_scripts/generate_noisy.py` — supports `--random_level` and `--level_weights`
 - Correction factor `(1/N + 1/16)` is applied during estimation to account for calibration data at 1–16 frame averages
 
-## Reproducing the Training Pipeline
+## Reproducing the Data Preparation Pipeline
 
 1. **`data_prep/step1_estimate_noise.py`** — estimate noise parameters from per-level TPAF calibration data and reorganise to per-FOV symlink layout.
 2. **`data_prep/step1b_select_patches.py`** — sliding-window patch selection (512×512, stride 256) keeping patches with ≥ 50 nucleus pixels.
 3. **`data_prep/step2_generate_noisy.py`** — synthesise noisy images at target frame-count levels (`--n_frames 1 4 8 16` or `--random_level`).
 4. **`data_prep/step3_build_splits.py`** — assemble train/val splits with clean images, masks, and noisy images (use `--copy` on Windows).
-5. **`training/train_stage2_colab.py`** — joint Stage 2 training with Colab A100 settings (batch_size=8, lora_r=32, num_workers=2).
