@@ -38,26 +38,17 @@ python inference/predict.py --checkpoint <model.pth> --input <images> --output <
 
 ### Dual-Encoder Design
 
-The core model (`models/afn_deseg.py`) has two parallel encoders feeding into two parallel decoders via a fusion block:
+The core model (`models/afn_deseg.py`) has two parallel encoders feeding into two parallel decoders via a fusion block.
 
-```
-Input (1ch TPAF) → preprocess_tpaf() → pseudo-RGB (3ch, ImageNet-normalized)
-                         ↓
-         ┌───────────────┴───────────────┐
-    U-Net Encoder                  DINOv2 ViT Encoder
-   (local features)              (global context, LoRA)
-    64→128→256→512                768-dim tokens, r=32
-         │ skip connections              │
-         └───────────┬──────────────────┘
-                Fusion Block
-          (concat 512+768 → conv → fused)
-                     ↓
-         ┌───────────┴───────────┐
-   Seg Decoder              Denoising Decoder
-   (raw logits)          (Tanh residual learning)
-         ↓                       ↓
-   Binary mask           denoised = clamp(input_gray + residual, 0, 1)
-```
+**U-Net encoder** — 4 downsampling blocks, channel progression 64 → 128 → 256 → 512. Produces a bottleneck tensor at 1/16 input resolution and a `skip_connections` list used by both decoders.
+
+**DINOv2 ViT encoder** — ViT-Base/16 (768-dim, 12 heads, depth 12). Processes pseudo-RGB input (3-channel repeat of the grayscale TPAF image with ImageNet normalisation). Only Q and V projection matrices receive LoRA adapters (r=32, α=32 by default); the rest of the backbone is frozen.
+
+**Feature fusion block** — Concatenates U-Net bottleneck (512 ch) with spatially-reshaped ViT patch tokens (768 ch, bicubic-upsampled to match spatial dims), then merges via 1×1 conv → 3×3 conv.
+
+**Denoising decoder** — Residual learning: predicts a Tanh-bounded signed residual added to the recovered input grayscale, then clamped to [0, 1]. Single-channel output.
+
+**Segmentation decoder** — Predicts a per-pixel probability map via sigmoid. Binary mask at inference by thresholding at 0.5.
 
 ### Gradient Isolation
 
@@ -65,6 +56,7 @@ The denoising decoder receives `fused.detach()` and `[s.detach() for s in skip_c
 - The shared encoder is trained **only** by segmentation loss
 - The denoising decoder trains independently on frozen encoder features
 - This prevents multi-task gradient conflict between L_rec and L_seg
+- **Do NOT remove the `.detach()` calls on `fused` and `skip_connections` in the denoising decoder — removing them causes segmentation loss to corrupt the denoising decoder.**
 
 ### LoRA on ViT
 
@@ -72,13 +64,13 @@ LoRA (`models/afn_deseg.py: LoRALinear`) adapts the frozen DINOv2 ViT by adding 
 
 ### Loss Functions
 
-`losses/joint_loss.py` computes: `L_total = λ_rec * L1(denoised, clean) + λ_seg * (Dice + BCE)(logits, mask)`
+`losses/joint_loss.py` computes: `L_total = λ_rec * L1(denoised, clean) + λ_seg * (Dice + BCE)(probs, mask)`
 
 Key details:
-- SegmentationDecoder outputs **raw logits** (no sigmoid) — `BCEWithLogitsLoss` is used for AMP numerical stability (FP16 sigmoid can produce exact 0.0 → log(0)=inf)
-- `DiceLoss` applies sigmoid internally
+- SegmentationDecoder outputs **sigmoid probabilities** — `BCELoss` is used; the loss must be wrapped in `torch.amp.autocast(device_type='cuda', enabled=False)` to avoid the PyTorch 2.x AMP dispatcher block
+- `DiceLoss` also receives sigmoid probabilities directly
 - DenoisingDecoder uses **residual learning**: output is Tanh-bounded noise residual, not the clean image directly
-- Perceptual loss (Cellpose features) is disabled by default (`lambda_percep=0.0`) due to hook issues
+- **Perceptual loss is permanently disabled (`lambda_percep=0.0`) — do NOT enable it. The Cellpose feature hook causes training crashes.**
 
 ### Two-Stage Training Pipeline
 
@@ -106,15 +98,33 @@ data_dir/                           data_dir/
     └── masks/
 ```
 
-Supported formats: `.npy`, `.png`, `.tif`. Files are matched by filename across subdirectories.
+Supported formats: `.npy`, `.png`, `.tif`. Files are matched by filename across subdirectories. On Windows, use `--copy` with `data_prep/step3_build_splits.py` to avoid symlink privilege errors (WinError 1314).
 
 ## Key Conventions
 
-- All images are normalized to ImageNet stats before entering the model (mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+- All images are normalised to ImageNet stats before entering the model (mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 - Single-channel TPAF images are converted to pseudo-RGB by `preprocess_tpaf()` (replicate across 3 channels)
-- The denoising decoder recovers original [0,1] grayscale by un-normalizing the input before adding the residual
-- Config defaults are in `configs/default_config.yaml` — training scripts override these via CLI args
-- `model.get_trainable_params()` returns only the parameters that should be optimized (respects frozen ViT + LoRA)
-- The Colab training script uses AMP (FP16) with `GradScaler`; the non-Colab script does not
+- The denoising decoder recovers original [0,1] grayscale by un-normalising the input before adding the residual
+- `model.get_trainable_params()` returns only the parameters that should be optimised (respects frozen ViT + LoRA)
+- Masks are stored as uint8 TIFF (patch-selected training images) or uint16 PNG (raw Cellpose outputs); `TPAFDataset._load_mask` routes by extension (tifffile for `.tif/.tiff`, skimage for `.png`)
+- AMP uses the non-deprecated API: `torch.amp.GradScaler('cuda')` and `torch.amp.autocast('cuda', ...)`
+- The Colab training script (`train_stage2_colab.py`) uses AMP (FP16) with `GradScaler`; the non-Colab script does not
 - Validation metric for early stopping and best-model saving is `val_dice`
 - `torch.load` calls use `weights_only=False` for PyTorch 2.6+ compatibility
+
+## Noise Model
+
+Mixed Poisson-Gaussian: `y = (1/a) · Poisson(a · x) + N(0, b²)`
+
+Variance scales as `Var[y_N] = (x/a + b²) / N` for N-frame averages. Parameters `a` (Poisson scale) and `b` (Gaussian std) are estimated by Multi-Level Mean-Variance regression (IRLS, Huber loss) over multi-frame TPAF calibration data.
+
+- Estimation: `noise_scripts/estimate_noise.py` — outputs `noise_params.json`
+- Synthesis: `noise_scripts/generate_noisy.py` — supports `--random_level` and `--level_weights`
+- Correction factor `(1/N + 1/16)` is applied during estimation to account for calibration data at 1–16 frame averages
+
+## Reproducing the Data Preparation Pipeline
+
+1. **`data_prep/step1_estimate_noise.py`** — estimate noise parameters from per-level TPAF calibration data and reorganise to per-FOV symlink layout.
+2. **`data_prep/step1b_select_patches.py`** — sliding-window patch selection (512×512, stride 256) keeping patches with ≥ 50 nucleus pixels.
+3. **`data_prep/step2_generate_noisy.py`** — synthesise noisy images at target frame-count levels (`--n_frames 1 4 8 16` or `--random_level`).
+4. **`data_prep/step3_build_splits.py`** — assemble train/val splits with clean images, masks, and noisy images (use `--copy` on Windows).
